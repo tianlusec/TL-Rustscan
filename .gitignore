@@ -1,0 +1,44 @@
+# Rust
+/target/
+/dist/
+**/*.rs.bk
+
+# IDEs
+.vscode/
+.idea/
+*.iml
+*.user
+
+# System
+.DS_Store
+Thumbs.db
+
+# Logs and Reports
+*.log
+*.pdb
+*.csv
+*.html
+report.md
+scan_report.md
+report_full.md
+
+# Temp files
+*.bak
+*.tmp
+*.swp
+
+# Project specific temp files
+fingerprints.json.bak.*
+1.md
+debug_favicon.py
+finger_extract.txt
+icon_hashes.txt
+paths.txt
+sanitize_dict.py
+seeyon_*.txt
+update_dict.ps1
+test_*.pdb
+
+# Keep these
+!fingerprints.json
+!imports/finger_custom.json

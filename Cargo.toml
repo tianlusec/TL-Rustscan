@@ -1,0 +1,49 @@
+[package]
+name = "TL-Rustscan"
+version = "1.0.0"
+edition = "2021"
+authors = ["TianLu Laboratory"]
+description = "A high-performance, high-concurrency port scanner written in Rust."
+repository = "https://github.com/TianLuLaboratory/TL-Rustscan"
+license = "MIT"
+keywords = ["port-scanner", "security", "red-team", "async", "rust"]
+categories = ["command-line-utilities", "network-programming"]
+
+[dependencies]
+tokio = { version = "1.32", features = ["full"] }
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ipnet = "2.9"
+anyhow = "1.0"
+thiserror = "1.0"
+colored = "2.0"
+futures = "0.3"
+regex = "1.10"
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
+url = "2.5"
+aho-corasick = "1.1"
+indicatif = "0.17"
+rand = "0.9.2"
+surge-ping = "0.8"
+x509-parser = "0.15.1"
+encoding_rs = "0.8.33"
+tokio-rustls = "0.24.1"
+webpki-roots = "0.25.4"
+rustls = "0.21.12"
+socket2 = "0.5"
+murmur3 = "0.5.2"
+base64 = "0.22.1"
+async-trait = "0.1"
+ssh2 = "0.9"
+mysql = "24.0"
+mongodb = { version = "2.8.0", default-features = false, features = ["tokio-runtime"] }
+tiberius = { version = "0.12", default-features = false, features = ["tokio", "tds73"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+tokio-postgres = "0.7"
+smb = "0.11.0"
+sspi = "0.18.4"
+des = "0.8"
+
+[build-dependencies]
+winres = "0.1"
