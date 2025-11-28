@@ -41,9 +41,11 @@ mongodb = { version = "2.8.0", default-features = false, features = ["tokio-runt
 tiberius = { version = "0.12", default-features = false, features = ["tokio", "tds73"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 tokio-postgres = "0.7"
+des = "0.8"
+
+[target.'cfg(windows)'.dependencies]
 smb = "0.11.0"
 sspi = "0.18.4"
-des = "0.8"
 
 [build-dependencies]
 winres = "0.1"
