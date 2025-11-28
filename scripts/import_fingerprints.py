@@ -59,6 +59,41 @@ def validate_rule(r):
     # keyword can be a list or string in external format
     pattern = r.get('keyword') or r.get('pattern')
 
+    # --- Support for FingerprintHub format (name, keyword[], headers{}) ---
+    if name and not method and not location:
+        rules_to_add = []
+        
+        # 1. Handle keywords (Body)
+        if pattern and isinstance(pattern, list):
+            for p in pattern:
+                rules_to_add.append({
+                    'name': name,
+                    'match_mode': 'keyword',
+                    'location': 'body',
+                    'pattern': p
+                })
+        
+        # 2. Handle headers
+        headers = r.get('headers')
+        if headers and isinstance(headers, dict):
+            for k, v in headers.items():
+                # Convert header match to regex: (?i)Key:.*Value
+                # Escape special chars in key/value just in case, but usually they are simple
+                # For simplicity, we assume simple strings. 
+                # If value is empty, just check for key? No, usually key:value.
+                if v:
+                    regex = f"(?i){re.escape(k)}:.*{re.escape(v)}"
+                    rules_to_add.append({
+                        'name': name,
+                        'match_mode': 'regex',
+                        'location': 'header',
+                        'pattern': regex
+                    })
+        
+        if rules_to_add:
+            return True, '', rules_to_add
+    # ---------------------------------------------------------------------
+
     if not all((name, method, location, pattern)):
         return False, 'missing_field', None
 

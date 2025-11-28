@@ -1,4 +1,4 @@
-# TL-Rustscan - High-Performance Async Port Scanner
+# TL-Rustscan v2.0 - High-Performance Async Port Scanner
 
 > **Developed by TianLu Laboratory**
 

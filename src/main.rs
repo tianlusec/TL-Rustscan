@@ -15,7 +15,7 @@ fn print_banner() {
     | |  | |    |  _  / | | / __| __/ __|/ __/ _` | '_ \ 
     | |  | |____| | \ \ |_| \__ \ |_\__ \ (_| (_| | | | |
     |_|  |______|_|  \_\__,_|___/\__|___/\___\__,_|_| |_|
-    TL-Rustscan v1.0.0 - Fast & Comprehensive Port Scanner
+    TL-Rustscan v2.0.0 - Fast & Comprehensive Port Scanner
     此工具由天禄实验室开发
     "#;
     eprintln!("{}", banner);
