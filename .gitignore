@@ -42,4 +42,4 @@ test_*.pdb
 # Keep these
 !fingerprints.json
 # Ignore imports folder
-# imports/
+!imports/finger_custom.json
