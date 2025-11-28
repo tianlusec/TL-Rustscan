@@ -28,7 +28,7 @@ jobs:
             bin: TL-Rustscan
             name_suffix: ""
           - name: macOS
-            os: macos-latest
+            os: macos-13
             target: x86_64-apple-darwin
             bin: TL-Rustscan
             name_suffix: ""
@@ -47,6 +47,11 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y libssl-dev libssh2-1-dev pkg-config
+
+    - name: Install dependencies (macOS)
+      if: matrix.platform.os == 'macos-13'
+      run: |
+        brew install openssl@3 libssh2 pkg-config
 
     - name: Build Binary
       run: cargo build --release --target ${{ matrix.platform.target }}
