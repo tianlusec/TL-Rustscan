@@ -1,57 +1,35 @@
 mod tcp_connect;
 mod udp_scan;
+mod host_discovery_optimized;
 mod host_discovery;
 pub mod web_dir;
 mod service_map;
 pub mod probes;
 pub mod fingerprint_db;
+mod constants;
+mod udp_config;
+mod connection_pool;
+pub mod rate_limit;
+mod checkpoint;
+mod adaptive;
+
 use crate::config::ScanConfig;
 use crate::target::Target;
 use crate::output::HostScanResult;
 use crate::output::PortResult;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::time::Instant;
-use futures::stream::{self, StreamExt};
+use std::time::{Duration, Instant};
+use futures::stream::{self, StreamExt, FuturesUnordered};
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::seq::SliceRandom;
 use rand::rng;
+use connection_pool::ConnectionPool;
+use rate_limit::TokenBucket;
+use adaptive::AdaptiveConcurrency;
+use std::path::Path;
+use crate::error::ErrorStats;
 
-struct TokenBucket {
-    rate: f64,
-    capacity: f64,
-    tokens: f64,
-    last_update: Instant,
-}
-
-impl TokenBucket {
-    fn new(rate: u32) -> Self {
-        Self {
-            rate: rate as f64,
-            capacity: rate as f64,
-            tokens: rate as f64,
-            last_update: Instant::now(),
-        }
-    }
-
-    async fn acquire(&mut self) {
-        loop {
-            let now = Instant::now();
-            let elapsed = now.duration_since(self.last_update).as_secs_f64();
-            self.tokens = (self.tokens + elapsed * self.rate).min(self.capacity);
-            self.last_update = now;
-
-            if self.tokens >= 1.0 {
-                self.tokens -= 1.0;
-                return;
-            }
-
-            let missing = 1.0 - self.tokens;
-            let wait_time = missing / self.rate;
-            tokio::time::sleep(std::time::Duration::from_secs_f64(wait_time)).await;
-        }
-    }
-}
 
 pub use tcp_connect::PortState;
 pub async fn run_scan(config: &ScanConfig, targets: Vec<Target>) -> Vec<HostScanResult> {
@@ -60,13 +38,13 @@ pub async fn run_scan(config: &ScanConfig, targets: Vec<Target>) -> Vec<HostScan
         if !config.json_output {
             println!("正在进行主机存活检测 (Ping/Connect)...");
         }
-        // 提高存活检测的最小并发数，防止在低并发设置下检测过慢
+        
         let discovery_concurrency = (config.concurrency / 8).max(50);
         let check_stream = stream::iter(targets)
             .map(|target| {
                 let cfg = config.clone();
                 async move {
-                    let alive = host_discovery::is_host_alive(target.ip, cfg.timeout_ms).await;
+                    let alive = host_discovery_optimized::is_host_alive(target.ip, cfg.timeout_ms).await;
                     (target, alive)
                 }
             })
@@ -88,6 +66,22 @@ pub async fn run_scan(config: &ScanConfig, targets: Vec<Target>) -> Vec<HostScan
     } else {
         targets
     };
+
+    
+    let mut checkpoint = if config.resume {
+        if let Ok(cp) = checkpoint::Checkpoint::load(Path::new("checkpoint.json")) {
+            if !config.json_output {
+                println!("已加载检查点，跳过 {} 个已扫描目标", cp.scanned_count());
+            }
+            cp
+        } else {
+            checkpoint::Checkpoint::new()
+        }
+    } else {
+        checkpoint::Checkpoint::new()
+    };
+    let scanned_set = checkpoint.scanned_targets.clone();
+
     let total_tasks = targets.len() * config.ports.len();
     let mut target_ips: Vec<(usize, std::net::IpAddr, Arc<String>)> = targets.iter()
         .enumerate()
@@ -119,6 +113,9 @@ pub async fn run_scan(config: &ScanConfig, targets: Vec<Target>) -> Vec<HostScan
             ports.shuffle(&mut rng);
         }
         ports.into_iter().map(move |port| (t_idx, ip, host.clone(), port))
+    })
+    .filter(move |(_, ip, _, port)| {
+        !scanned_set.contains(&(ip.to_string(), *port))
     });
 
     let rate_limiter = if config.rate > 0 {
@@ -127,85 +124,163 @@ pub async fn run_scan(config: &ScanConfig, targets: Vec<Target>) -> Vec<HostScan
         None
     };
 
-    let mut stream = stream::iter(tasks_iter)
-        .map(|(t_idx, ip, host, port)| {
-            let cfg = config.clone();
-            let limiter = rate_limiter.clone();
-            async move {
-                if let Some(limiter) = limiter {
-                    let mut bucket = limiter.lock().await;
-                    bucket.acquire().await;
-                }
+    
+    let pool = if config.use_connection_pool {
+        Some(Arc::new(ConnectionPool::new(10, Duration::from_secs(30))))
+    } else {
+        None
+    };
 
-                let (state, banner, dirs) = if cfg.udp {
-                    let s = udp_scan::scan_single_port(ip, port, cfg.timeout_ms).await;
-                    (s, None, Vec::new()) 
-                } else {
-                    let args = tcp_connect::TcpScanArgs {
-                        ip,
-                        port,
-                        host,
-                        timeout_ms: cfg.timeout_ms,
-                        grab_banner: cfg.banner,
-                        dir_scan: cfg.dir_scan,
-                        dir_paths: &cfg.dir_paths,
-                        web_ports: &cfg.web_ports,
-                        deep_scan: cfg.deep_scan,
-                    };
-                    tcp_connect::scan_single_port(args).await
-                };
-                (t_idx, port, state, banner, dirs)
-            }
-        })
-        .buffer_unordered(config.concurrency);
+    let adaptive = Arc::new(AdaptiveConcurrency::new(config.concurrency, 10, 10000));
+    let error_stats = Arc::new(Mutex::new(ErrorStats::new()));
+    let mut active_tasks = FuturesUnordered::new();
+    let mut tasks_iter = tasks_iter;
+
     let mut results = Vec::new();
     let mut retry_candidates = Vec::new();
+    let mut retry_queue_full_warned = false;
 
-    while let Some((t_idx, port, state, mut banner, dirs)) = stream.next().await {
-        if let Some(pb) = &pb {
-            pb.inc(1);
-        }
+    let mut open_count = 0;
+    let mut closed_count = 0;
+    let mut filtered_count = 0;
+
+    loop {
         
-        // 收集需要重试的端口 (Filtered only)
-        // 只有 Filtered (超时) 的端口才值得重试。Closed (RST) 的端口是明确关闭的，重试没有意义。
-        // 增加上限保护，防止全网段 Filtered 导致 OOM
-        if config.retry > 0 && !config.udp && state == PortState::Filtered {
-            if retry_candidates.len() < 100_000 {
-                retry_candidates.push((t_idx, port));
-            } else if retry_candidates.len() == 100_000 {
-                if !config.json_output {
-                    eprintln!("警告: 重试队列已满 (10w+)，后续的超时端口将不再重试。这通常意味着目标网络存在防火墙或连接质量极差。");
-                }
-                // 占位，防止重复打印警告
-                retry_candidates.push((0, 0)); 
-            }
+        let limit = adaptive.get_current();
+        while active_tasks.len() < limit {
+             if let Some((t_idx, ip, host, port)) = tasks_iter.next() {
+                 let cfg = config.clone();
+                 let pool_clone = pool.clone();
+                 let limiter = rate_limiter.clone();
+                 let adaptive_clone = adaptive.clone();
+                 let error_stats_clone = error_stats.clone();
+                 
+                 active_tasks.push(async move {
+                    let start = Instant::now();
+
+                    let (state, banner, dirs) = if cfg.udp {
+                        if let Some(l) = &limiter {
+                            let mut bucket = l.lock().await;
+                            bucket.acquire().await;
+                        }
+                        let (s, b) = udp_scan::scan_single_port(ip, port, cfg.timeout_ms).await;
+                        (s, b, Vec::new()) 
+                    } else {
+                        let args = tcp_connect::TcpScanArgs {
+                            ip,
+                            port,
+                            host,
+                            timeout_ms: cfg.timeout_ms,
+                            grab_banner: cfg.banner,
+                            dir_scan: cfg.dir_scan,
+                            dir_paths: &cfg.dir_paths,
+                            web_ports: &cfg.web_ports,
+                            insecure: cfg.insecure,
+                            proxy: cfg.proxy.clone(),
+                            connection_pool: pool_clone,
+                            rate_limiter: limiter.clone(),
+                            deep_scan: cfg.deep_scan,
+                            error_stats: Some(error_stats_clone),
+                        };
+                        tcp_connect::scan_single_port(args).await
+                    };
+                    
+                    
+                    let duration = start.elapsed();
+                    let success = state == PortState::Open;
+                    let is_timeout = state == PortState::Filtered; 
+                    adaptive_clone.record_result(success, is_timeout, duration).await;
+
+                    (t_idx, port, state, banner, dirs)
+                 });
+             } else {
+                 break;
+             }
         }
 
-        if banner.is_none() && state == PortState::Open {
-            let protocol = if config.udp { "udp" } else { "tcp" };
-            if let Some(service) = service_map::get_service_name(port, protocol) {
-                banner = Some(format!("{}?", service));
-            }
+        if active_tasks.is_empty() {
+            break;
         }
-        if !config.json_output && (state == PortState::Open || config.show_closed) {
-            let ip = targets[t_idx].ip;
-            let output = crate::output::format_realtime_output(&ip, port, state, banner.as_deref(), &dirs);
+
+        if let Some((t_idx, port, state, mut banner, dirs)) = active_tasks.next().await {
             if let Some(pb) = &pb {
-                pb.println(output);
-            } else {
-                println!("{}", output);
+                pb.inc(1);
             }
-        }
-        // 内存优化：仅存储用户关心的结果，防止大规模扫描时 OOM
-        if state == PortState::Open || config.show_closed {
-            results.push((t_idx, port, state, banner, dirs));
+
+            match state {
+                PortState::Open => open_count += 1,
+                PortState::Closed => closed_count += 1,
+                PortState::Filtered => filtered_count += 1,
+            }
+            
+            
+            
+            
+            if config.retry > 0 && !config.udp && state == PortState::Filtered {
+                if retry_candidates.len() < 100_000 {
+                    retry_candidates.push((t_idx, port));
+                } else if !retry_queue_full_warned {
+                    if !config.json_output {
+                        eprintln!("警告: 重试队列已满 (10w+)，后续的超时端口将不再重试。这通常意味着目标网络存在防火墙或连接质量极差。");
+                    }
+                    retry_queue_full_warned = true;
+                }
+            }
+
+            if banner.is_none() && state == PortState::Open {
+                let protocol = if config.udp { "udp" } else { "tcp" };
+                if let Some(service) = service_map::get_service_name(port, protocol) {
+                    banner = Some(format!("{}?", service));
+                }
+            }
+            if !config.json_output && (state == PortState::Open || config.show_closed) {
+                let ip = targets[t_idx].ip;
+                let output = crate::output::format_realtime_output(&ip, port, state, banner.as_deref(), &dirs);
+                if let Some(pb) = &pb {
+                    pb.println(output);
+                } else {
+                    println!("{}", output);
+                }
+            }
+            
+            if state == PortState::Open || config.show_closed {
+                results.push((t_idx, port, state, banner, dirs));
+            }
+
+            
+            if config.resume {
+                let ip = targets[t_idx].ip;
+                checkpoint.mark_scanned(&ip.to_string(), port);
+                if checkpoint.scanned_count() % 1000 == 0 {
+                    if let Err(e) = checkpoint.save(Path::new("checkpoint.json")) {
+                        if !config.json_output {
+                            eprintln!("警告: 无法保存检查点: {}", e);
+                        }
+                    }
+                }
+            }
         }
     }
     if let Some(pb) = &pb {
         pb.finish_with_message("第一轮扫描完成");
     }
 
-    // 智能重试逻辑
+    if !config.json_output {
+        println!("扫描统计: 开放 {}, 关闭 {}, 过滤/超时 {}", open_count, closed_count, filtered_count);
+        let stats = error_stats.lock().await;
+        println!("错误详情: {}", stats.summary());
+    }
+
+    
+    if config.resume {
+        if let Err(e) = checkpoint.save(Path::new("checkpoint.json")) {
+             if !config.json_output {
+                eprintln!("警告: 无法保存最终检查点: {}", e);
+            }
+        }
+    }
+
+    
     if config.retry > 0 && !retry_candidates.is_empty() {
         let retry_count = retry_candidates.len();
         let retry_pb = if !config.json_output {
@@ -221,12 +296,15 @@ pub async fn run_scan(config: &ScanConfig, targets: Vec<Target>) -> Vec<HostScan
             None
         };
         
-        let retry_concurrency = (config.concurrency / 5).max(10); // 降低并发
-        let retry_timeout = config.timeout_ms * 2; // 增加超时
+        let retry_concurrency = (config.concurrency / 5).max(10); 
+        let retry_timeout = config.timeout_ms * 2; 
 
         let retry_stream = stream::iter(retry_candidates)
             .map(|(t_idx, port)| {
                 let cfg = config.clone();
+                let pool_clone = pool.clone();
+                let limiter = rate_limiter.clone();
+                let error_stats_clone = error_stats.clone();
                 let target = &targets[t_idx];
                 let ip = target.ip;
                 let host = Arc::new(target.host.clone());
@@ -240,7 +318,12 @@ pub async fn run_scan(config: &ScanConfig, targets: Vec<Target>) -> Vec<HostScan
                         dir_scan: cfg.dir_scan,
                         dir_paths: &cfg.dir_paths,
                         web_ports: &cfg.web_ports,
+                        insecure: cfg.insecure,
+                        proxy: cfg.proxy.clone(),
+                        connection_pool: pool_clone,
+                        rate_limiter: limiter,
                         deep_scan: cfg.deep_scan,
+                        error_stats: Some(error_stats_clone),
                     };
                     let (state, banner, dirs) = tcp_connect::scan_single_port(args).await;
                     (t_idx, port, state, banner, dirs)
@@ -255,7 +338,7 @@ pub async fn run_scan(config: &ScanConfig, targets: Vec<Target>) -> Vec<HostScan
             }
 
             if state == PortState::Open {
-                // 如果复查发现端口开放，更新结果
+                
                 if banner.is_none() {
                     if let Some(service) = service_map::get_service_name(port, "tcp") {
                         banner = Some(format!("{}?", service));
@@ -272,11 +355,11 @@ pub async fn run_scan(config: &ScanConfig, targets: Vec<Target>) -> Vec<HostScan
                     }
                 }
 
-                // 更新 results 中的记录
+                
                 if let Some(existing) = results.iter_mut().find(|(t, p, _, _, _)| *t == t_idx && *p == port) {
                     *existing = (t_idx, port, state, banner, dirs);
                 } else {
-                    // 如果之前因为 Filtered 没存入 results，现在变 Open 了，需要补录
+                    
                     results.push((t_idx, port, state, banner, dirs));
                 }
             }
@@ -307,27 +390,27 @@ pub async fn run_scan(config: &ScanConfig, targets: Vec<Target>) -> Vec<HostScan
         res.ports.sort_by_key(|p| p.port);
     }
 
-    // 插件扫描逻辑
-    if !config.udp { // 暂时只支持 TCP 插件
+    
+    if !config.udp { 
         use crate::plugins::{PluginManager, HostInfo};
         let pm = PluginManager::new();
         
-        // 收集所有开放端口的任务
+        
         let mut plugin_tasks = Vec::new();
         for (h_idx, host_res) in host_results.iter().enumerate() {
             for port_res in &host_res.ports {
                 if port_res.state == PortState::Open {
                     let plugins = pm.get_plugins_for_port(port_res.port);
                     for plugin in plugins {
-                        // 核心逻辑：
-                        // 1. 如果插件是 rscan 专属 (is_rscan_only() == true)，则必须开启 --rscan 才会运行
-                        // 2. 如果插件是通用功能 (is_rscan_only() == false)，则默认运行 (如 WebTitle)
+                        
+                        
+                        
                         
                         if plugin.is_rscan_only() && !config.rscan {
                             continue;
                         }
 
-                        // 3. 细粒度控制: --no-brute 和 --no-poc
+                        
                         match plugin.plugin_type() {
                             crate::plugins::PluginType::Brute => {
                                 if config.no_brute { continue; }
@@ -338,7 +421,7 @@ pub async fn run_scan(config: &ScanConfig, targets: Vec<Target>) -> Vec<HostScan
                             _ => {}
                         }
                         
-                        // 处理 IPv6 地址格式，确保 URL 和连接字符串正确
+                        
                         let host_str = if host_res.ip.contains(':') {
                             format!("[{}]", host_res.ip)
                         } else {
@@ -349,6 +432,7 @@ pub async fn run_scan(config: &ScanConfig, targets: Vec<Target>) -> Vec<HostScan
                             host: host_str.clone(),
                             port: port_res.port.to_string(),
                             url: format!("http://{}:{}", host_str, port_res.port),
+                proxy: config.proxy.clone(),
                             infostr: Vec::new(),
                         };
                         plugin_tasks.push((h_idx, plugin, info));
@@ -372,14 +456,14 @@ pub async fn run_scan(config: &ScanConfig, targets: Vec<Target>) -> Vec<HostScan
                         }
                     }
                 })
-                .buffer_unordered(config.concurrency); // 复用并发配置
+                .buffer_unordered(config.concurrency); 
 
             let vuln_results: Vec<(usize, String)> = plugin_stream
                 .filter_map(|res| async { res })
                 .collect()
                 .await;
             
-            // 将漏洞信息合并回 host_results
+            
             for (h_idx, vuln) in vuln_results {
                 if h_idx < host_results.len() {
                     host_results[h_idx].vulns.push(vuln);

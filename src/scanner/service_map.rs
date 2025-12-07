@@ -70,8 +70,14 @@ fn init_udp_services() -> HashMap<u16, &'static str> {
 }
 pub fn get_service_name(port: u16, protocol: &str) -> Option<&'static str> {
     match protocol {
-        "tcp" => TCP_SERVICES.get_or_init(init_tcp_services).get(&port).copied(),
-        "udp" => UDP_SERVICES.get_or_init(init_udp_services).get(&port).copied(),
+        "tcp" => TCP_SERVICES
+            .get_or_init(init_tcp_services)
+            .get(&port)
+            .copied(),
+        "udp" => UDP_SERVICES
+            .get_or_init(init_udp_services)
+            .get(&port)
+            .copied(),
         _ => None,
     }
 }

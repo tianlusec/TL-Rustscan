@@ -1,4 +1,4 @@
-# TL-Rustscan v2.0 - High-Performance Async Port Scanner
+# TL-Rustscan v2.3.0 - High-Performance Async Port Scanner
 
 > **Developed by TianLu Laboratory**
 
@@ -19,6 +19,8 @@ This tool is only allowed to be used for internal asset management, security sel
 *   **Blazing Fast**: Based on the Tokio asynchronous runtime, supporting thousands of concurrent connections, completing common port probes in seconds.
 *   **Real-time Feedback**: Open ports are output immediately upon discovery, without waiting for the scan to finish.
 *   **Full Port Coverage**: Scans 1-65535 ports by default, leaving no hidden services behind.
+*   **Proxy Support**: Supports SOCKS5 proxy (`--proxy`) to bypass firewalls or hide the source.
+*   **UDP Enhancements**: Built-in payloads for DNS, NTP, SNMP, etc., significantly improving UDP identification.
 *   **Red Team Mode**: Provides `--rscan` flag, integrating weak password brute-force (SSH, SMB, RDP, etc.) and high-risk vulnerability detection (MS17-010, WebLogic, etc.) for one-click intranet penetration.
 *   **Smart Protocol Handshake**: Supports active probing for RTSP, SOCKS5, MQTT, AMQP, etc., automatically identifying services without banners.
 *   **Context-Aware Fuzzing**: Web directory scanning automatically loads specific sensitive paths based on detected fingerprints (e.g., Spring, PHP).
@@ -105,7 +107,14 @@ Supports automatic CIDR parsing to batch scan hosts within a subnet.
 TL-Rustscan 192.168.1.0/24 -p 80,443
 ```
 
-### 4. Import Targets from File
+### 4. Scan with Proxy
+Supports scanning via SOCKS5 proxy to hide your IP or access internal targets.
+
+```powershell
+TL-Rustscan 192.168.1.10 --proxy socks5://127.0.0.1:1080
+```
+
+### 5. Import Targets from File
 For multiple targets, write them into a text file (one IP, domain, or subnet per line) and load with `-L`.
 
 **targets.txt example:**
@@ -120,7 +129,7 @@ db-server.local
 TL-Rustscan -L targets.txt -p 1-1000
 ```
 
-### 5. JSON Output (Automation)
+### 6. JSON Output (Automation)
 Use the `--json` parameter to output results in JSON format, suitable for programmatic parsing.
 
 ```powershell
@@ -131,7 +140,7 @@ Or save directly to a file:
 TL-Rustscan 192.168.1.10 -o result.json
 ```
 
-### 6. Performance Tuning
+### 7. Performance Tuning
 *   **Concurrency (`-C`)**: Default is 200. Can be increased to 1000-2000 for faster speeds in good network conditions.
 *   **Timeout (`-t`)**: Default is 500ms. Can be lowered (e.g., 200ms) for intranet, or increased (e.g., 1000ms) for internet/high-latency environments.
 *   **Skip Retry (`-x`)**: By default, the tool performs a smart retry on timed-out ports to prevent false negatives. Use `-x` to disable this for maximum speed.
@@ -141,7 +150,7 @@ TL-Rustscan 192.168.1.10 -o result.json
 TL-Rustscan 10.0.0.0/16 -p 80 -C 2000 -t 200 -x
 ```
 
-### 7. Service Fingerprinting & Web Title
+### 8. Service Fingerprinting & Web Title
 Use `-b` or `--banner` parameter. The tool will:
 1.  Attempt to read service banners (e.g., SSH, FTP, MySQL, PostgreSQL, RDP).
 2.  For Web services, automatically send requests to extract **Web Title** and **Web Framework Fingerprints** (e.g., Spring Boot, Laravel, Vue, etc.).
@@ -157,14 +166,14 @@ Output Example:
 192.168.1.10:3306 is open (MySQL 5.7.33-log)
 ```
 
-### 8. Generate Markdown Report
+### 9. Generate Markdown Report
 Use `--output-markdown <FILE>` to save scan results as a beautiful Markdown report.
 
 ```powershell
 TL-Rustscan 192.168.1.0/24 -p 80,443 -b --output-markdown report.md
 ```
 
-### 9. UDP Scan
+### 10. UDP Scan
 Use `--udp` parameter to enable UDP scanning mode.
 Note: UDP scanning is slower and unreliable; recommended only for specific ports (e.g., DNS 53, NTP 123, SNMP 161).
 
@@ -172,7 +181,7 @@ Note: UDP scanning is slower and unreliable; recommended only for specific ports
 TL-Rustscan 192.168.1.1 -p 53,123,161 --udp
 ```
 
-### 10. Host Discovery
+### 11. Host Discovery
 Use `--check` parameter to perform host discovery (Ping/Connect) before scanning ports.
 Useful for large subnets to skip offline hosts and save time.
 
@@ -181,7 +190,7 @@ Useful for large subnets to skip offline hosts and save time.
 TL-Rustscan 10.0.0.0/16 -p 80 --check
 ```
 
-### 11. Web Directory Busting
+### 12. Web Directory Busting
 Use `--dir` parameter to enable Web directory busting.
 When a Web port (80, 443, 8080, etc.) is found, it automatically probes common paths (Built-in 300,000+ entries dictionary covering `/admin`, `/login`, `/backup` and various backup files).
 
@@ -192,6 +201,11 @@ TL-Rustscan 192.168.1.10 -p 80,8080 --dir
 You can also use `--paths` to specify a custom dictionary file:
 ```powershell
 TL-Rustscan 192.168.1.10 -p 80 --dir --paths my_dict.txt
+```
+
+You can also use `--dir-concurrency` to control the concurrency of directory scanning (default 50):
+```powershell
+TL-Rustscan 192.168.1.10 -p 80 --dir --dir-concurrency 100
 ```
 
 If you want to enable directory busting on non-standard ports (e.g., 12345), use `--dir-ports`:
@@ -344,25 +358,88 @@ TL-Rustscan --dump-json
 
 ```text
 TL-Rustscan/
+├── .github/                # GitHub configuration
+│   ├── workflows/          # GitHub Actions workflows
+│   │   └── build.yml       # Auto-build multi-platform executables
+│   ├── ISSUE_TEMPLATE/     # Issue templates
+│   └── PULL_REQUEST_TEMPLATE.md # PR template
 ├── src/                    # Rust source code directory
 │   ├── scanner/            # Core scanning modules
+│   │   ├── mod.rs          # Scanner main module
 │   │   ├── tcp_connect.rs  # TCP port scanning implementation
 │   │   ├── udp_scan.rs     # UDP port scanning implementation
+│   │   ├── udp_config.rs   # UDP scan configuration
 │   │   ├── probes.rs       # Service fingerprinting & detection
 │   │   ├── web_dir.rs      # Web directory busting
-│   │   └── ...
+│   │   ├── fingerprint_db.rs # Fingerprint database management
+│   │   ├── host_discovery.rs # Host discovery
+│   │   ├── adaptive.rs     # Adaptive concurrency control
+│   │   ├── connection_pool.rs # TCP connection pool
+│   │   ├── scan_cache.rs   # Scan result cache
+│   │   ├── checkpoint.rs   # Resume scanning
+│   │   ├── streaming_output.rs # Streaming output
+│   │   ├── service_map.rs  # Service mapping
+│   │   └── constants.rs    # Constants definition
+│   ├── plugins/            # Plugin modules
+│   │   ├── mod.rs          # Plugin manager
+│   │   ├── ssh.rs          # SSH brute-force
+│   │   ├── redis.rs        # Redis unauthorized/weak password
+│   │   ├── mysql.rs        # MySQL weak password
+│   │   ├── mssql.rs        # MSSQL weak password
+│   │   ├── postgres.rs     # PostgreSQL weak password
+│   │   ├── mongodb.rs      # MongoDB unauthorized/weak password
+│   │   ├── ftp.rs          # FTP weak password
+│   │   ├── telnet.rs       # Telnet weak password
+│   │   ├── smb.rs          # SMB weak password
+│   │   ├── rdp.rs          # RDP detection
+│   │   ├── vnc.rs          # VNC weak password
+│   │   ├── ms17010.rs      # MS17-010 vulnerability detection
+│   │   ├── web_pocs.rs     # Web vulnerability POCs
+│   │   ├── web_fingerprints.rs # Web fingerprinting
+│   │   ├── webtitle.rs     # Web title extraction
+│   │   ├── memcached.rs    # Memcached detection
+│   │   ├── elasticsearch.rs # Elasticsearch detection
+│   │   ├── zookeeper.rs    # Zookeeper detection
+│   │   ├── docker.rs       # Docker detection
+│   │   ├── netbios.rs      # NetBIOS information gathering
+│   │   ├── snmp.rs         # SNMP detection
+│   │   ├── oracle.rs       # Oracle detection
+│   │   ├── fcgi.rs         # FastCGI detection
+│   │   ├── ldap.rs         # LDAP detection
+│   │   ├── jdwp.rs         # JDWP detection
+│   │   └── dicts.rs        # Weak password dictionaries
 │   ├── config.rs           # CLI argument parsing & configuration
 │   ├── main.rs             # Program entry point
-│   ├── output.rs           # Multi-format output (JSON, CSV, HTML, etc.)
-│   └── target.rs           # Target parsing logic (CIDR, Domain, IP Range)
+│   ├── output.rs           # Multi-format output (JSON, CSV, HTML, Markdown)
+│   ├── target.rs           # Target parsing logic (CIDR, Domain, IP Range)
+│   └── error.rs            # Error handling module
+├── docs/                   # Documentation directory
+│   ├── FEATURES.md         # Feature documentation
+│   ├── DEVELOPMENT.md      # Development guide
+│   └── TESTING.md          # Testing guide
 ├── scripts/                # Auxiliary scripts
 │   ├── update_fingerprints.py # Fingerprint DB updater (Wappalyzer/Nuclei/Recog)
-│   └── import_fingerprints.py # Custom fingerprint importer (Finger/Ehole format)
+│   ├── import_fingerprints.py # Custom fingerprint importer (Finger/Ehole format)
+│   └── fetch_and_merge.py  # Fingerprint data fetching & merging
+├── imports/                # Import data directory
+│   └── finger_custom.json  # Custom fingerprint data
 ├── tests/                  # Test cases
+│   └── integration_test.py # Integration tests
 ├── Cargo.toml              # Project dependencies
+├── Cargo.lock              # Dependency lock file
+├── build.rs                # Build script
 ├── build.bat               # Windows quick build script
 ├── build.sh                # Linux/macOS quick build script
-└── Dockerfile              # Docker deployment file
+├── Dockerfile              # Docker deployment file
+├── LICENSE                 # MIT License
+├── README.md               # Chinese documentation
+├── README_EN.md            # English documentation
+├── CHANGELOG.md            # Chinese changelog
+├── CHANGELOG_EN.md         # English changelog
+├── CONTRIBUTING.md         # Chinese contributing guide
+├── CONTRIBUTING_EN.md      # English contributing guide
+├── fingerprints.json       # Fingerprint database file
+└── .gitignore              # Git ignore rules
 ```
 
 ## FAQ
@@ -375,3 +452,15 @@ A: The target might have a firewall. This tool currently only supports TCP Conne
 
 **Q: Too many results flooding the screen?**
 A: Recommend using `--json` or `-o result.json` to save results to a file for viewing.
+
+## 📚 Documentation
+
+For more details, please refer to the documentation in the `docs/` directory:
+
+*   [Features (FEATURES.md)](docs/FEATURES.md)
+*   [Development Guide (DEVELOPMENT.md)](docs/DEVELOPMENT.md)
+*   [Testing Guide (TESTING.md)](docs/TESTING.md)
+*   [API Documentation (API.md)](docs/API.md)
+*   [Architecture (ARCHITECTURE.md)](docs/ARCHITECTURE.md)
+*   [Security Policy (SECURITY.md)](docs/SECURITY.md)
+*   [Project Structure (PROJECT_STRUCTURE.md)](docs/PROJECT_STRUCTURE.md)

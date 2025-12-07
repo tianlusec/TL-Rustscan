@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2024-12-07
+
+### Major Release
+This release is a significant milestone for TL-Rustscan, focusing on performance optimization, code refactoring, and open-source preparation.
+
+### Added
+- **Adaptive Concurrency Control**: Dynamically adjusts concurrency based on network conditions to improve scanning efficiency.
+- **Connection Pool Health Check**: Optimized TCP connection reuse mechanism to reduce resource usage.
+- **Parallel Fingerprint Matching**: Improved fingerprint matching speed.
+- **Comprehensive Documentation**: Added detailed documentation for API, Architecture, Security, etc.
+
+### Optimized
+- **Code Refactoring**: Comprehensive cleanup of the codebase, removing redundant code and comments.
+- **Project Structure**: Standardized project directory structure to meet open-source standards.
+- **Build System**: Optimized build scripts and removed unnecessary build artifacts.
+
+### Fixed
+- Fixed multiple potential logic errors and performance bottlenecks.
+
 ## [1.2.2] - 2025-11-28
 
 ### Performance & Control Enhancements
@@ -185,7 +204,7 @@ This update focuses on a deep audit and refactoring of **scan precision** and **
   - Optimized target resolution with (IP, Host) based VHost deduplication.
   - Improved CSV output format to comply with RFC 4180.
 
-## [0.1.0] - 2025-11-23
+## [0.1.0] - 2024-11-23
 
 ### Added
 - Initial release of TL-Rustscan.

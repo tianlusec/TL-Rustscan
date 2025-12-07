@@ -17,12 +17,61 @@ pub enum PortState {
     Filtered,
 }
 
-async fn connect_with_backoff(addr: std::net::SocketAddr, timeout_ms: u64) -> std::io::Result<TcpStream> {
+async fn socks5_handshake(mut stream: TcpStream, target: std::net::SocketAddr) -> std::io::Result<TcpStream> {
+    
+    stream.write_all(&[0x05, 0x01, 0x00]).await?; 
+    let mut buf = [0u8; 2];
+    stream.read_exact(&mut buf).await?;
+    if buf[0] != 0x05 || buf[1] != 0x00 {
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, "SOCKS5 handshake failed: unsupported auth"));
+    }
+
+    
+    let mut request = vec![0x05, 0x01, 0x00]; 
+    match target {
+        std::net::SocketAddr::V4(v4) => {
+            request.push(0x01); 
+            request.extend_from_slice(&v4.ip().octets());
+        },
+        std::net::SocketAddr::V6(v6) => {
+            request.push(0x04); 
+            request.extend_from_slice(&v6.ip().octets());
+        }
+    }
+    request.extend_from_slice(&target.port().to_be_bytes());
+    stream.write_all(&request).await?;
+
+    
+    let mut resp_header = [0u8; 4];
+    stream.read_exact(&mut resp_header).await?;
+    if resp_header[1] != 0x00 {
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("SOCKS5 connect failed: code {}", resp_header[1])));
+    }
+    
+    
+    match resp_header[3] {
+        0x01 => { let mut buf = [0u8; 4 + 2]; stream.read_exact(&mut buf).await?; }, 
+        0x03 => { 
+            let mut len_buf = [0u8; 1];
+            stream.read_exact(&mut len_buf).await?;
+            let len = len_buf[0] as usize;
+            let mut buf = vec![0u8; len + 2];
+            stream.read_exact(&mut buf).await?;
+        },
+        0x04 => { let mut buf = [0u8; 16 + 2]; stream.read_exact(&mut buf).await?; }, 
+        _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "SOCKS5 invalid address type")),
+    }
+
+    Ok(stream)
+}
+
+async fn connect_with_backoff(target_addr: std::net::SocketAddr, timeout_ms: u64, proxy_addr: Option<std::net::SocketAddr>) -> std::io::Result<TcpStream> {
     let start = std::time::Instant::now();
     let mut backoff = 20;
     let timeout_duration = Duration::from_millis(timeout_ms);
+    let connect_addr = proxy_addr.unwrap_or(target_addr);
 
-    // 随机抖动 (Jitter)
+    
     let jitter = rand::random::<u64>() % 50;
     tokio::time::sleep(Duration::from_millis(jitter)).await;
 
@@ -37,32 +86,48 @@ async fn connect_with_backoff(addr: std::net::SocketAddr, timeout_ms: u64) -> st
 
         #[cfg(target_os = "windows")]
         let connect_result = {
-            // Windows 下使用 spawn_blocking + std::net::TcpStream::connect_timeout 绕过异步连接的超时陷阱
+            
+            let addr_copy = connect_addr;
             tokio::task::spawn_blocking(move || {
-                std::net::TcpStream::connect_timeout(&addr, remaining)
+                std::net::TcpStream::connect_timeout(&addr_copy, remaining)
             }).await
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
         };
 
         #[cfg(not(target_os = "windows"))]
         let connect_result = {
-            // 非 Windows 系统直接使用 Tokio 的异步连接，性能更高
-            timeout(remaining, TcpStream::connect(addr)).await
+            
+            timeout(remaining, TcpStream::connect(connect_addr)).await
                 .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "connection timed out"))?
-                .and_then(|s| s.into_std()) // 统一转换为 std::net::TcpStream 以便后续处理
+                .and_then(|s| s.into_std()) 
         };
 
         match connect_result {
             Ok(std_stream) => {
-                // 将 std::net::TcpStream 转换为 tokio::net::TcpStream
+                
                 std_stream.set_nonblocking(true)?;
-                return TcpStream::from_std(std_stream);
+                let mut stream = TcpStream::from_std(std_stream)?;
+                
+                if proxy_addr.is_some() {
+                    
+                    let handshake_remaining = timeout_duration.saturating_sub(start.elapsed());
+                    if handshake_remaining.is_zero() {
+                         return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "connection timed out during handshake"));
+                    }
+                    match timeout(handshake_remaining, socks5_handshake(stream, target_addr)).await {
+                        Ok(Ok(s)) => stream = s,
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "connection timed out during handshake")),
+                    }
+                }
+                
+                return Ok(stream);
             },
             Err(e) => {
                 let raw_err = e.raw_os_error().unwrap_or(0);
-                // 处理本地端口耗尽 (WSAEADDRINUSE / EADDRINUSE)
+                
                 if raw_err == 10048 || raw_err == 98 || raw_err == 48 {
-                    // 严重错误：本地端口耗尽，强制等待更长时间
+                    
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     backoff = (backoff * 2).min(2000);
                     continue;
@@ -79,6 +144,10 @@ async fn connect_with_backoff(addr: std::net::SocketAddr, timeout_ms: u64) -> st
 }
 
 use std::sync::Arc;
+use crate::scanner::connection_pool::ConnectionPool;
+use crate::scanner::rate_limit::TokenBucket;
+use crate::error::{ErrorStats, ScanError};
+use tokio::sync::Mutex;
 
 pub struct TcpScanArgs<'a> {
     pub ip: IpAddr,
@@ -89,7 +158,12 @@ pub struct TcpScanArgs<'a> {
     pub dir_scan: bool,
     pub dir_paths: &'a [String],
     pub web_ports: &'a [u16],
+    pub insecure: bool,
+    pub proxy: Option<String>,
+    pub connection_pool: Option<Arc<ConnectionPool>>,
+    pub rate_limiter: Option<Arc<Mutex<TokenBucket>>>,
     pub deep_scan: bool,
+    pub error_stats: Option<Arc<Mutex<ErrorStats>>>,
 }
 
 pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<String>, Vec<String>) {
@@ -101,20 +175,74 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
     let dir_scan = args.dir_scan;
     let dir_paths = args.dir_paths;
     let web_ports = args.web_ports;
+    let insecure = args.insecure;
+    let proxy = args.proxy.clone();
+    let connection_pool = args.connection_pool.clone();
+    let rate_limiter = args.rate_limiter.clone();
     let deep_scan = args.deep_scan;
+    let error_stats = args.error_stats.clone();
+
+    let proxy_addr = if let Some(ref p) = proxy {
+        if let Ok(url) = Url::parse(p) {
+            if let Some(h) = url.host_str() {
+                let port = url.port().unwrap_or(1080);
+                match tokio::net::lookup_host((h, port)).await {
+                    Ok(mut addrs) => addrs.next(),
+                    Err(_) => None,
+                }
+            } else { None }
+        } else { None }
+    } else { None };
 
     let addr = std::net::SocketAddr::new(ip, port);
     let timeout_duration = Duration::from_millis(timeout_ms);
 
-    // 统一使用 connect_with_backoff，移除 connect_with_rst 以修复 Windows 下 Closed 误报为 Filtered 的问题
-    let connect_result = connect_with_backoff(addr, timeout_ms).await;
+    
+    if let Some(limiter) = &rate_limiter {
+        limiter.lock().await.acquire().await;
+    }
 
-    match connect_result {
-        Ok(mut stream) => {
+    
+    let mut stream_opt = None;
+    if let Some(pool) = &connection_pool {
+        if let Some(s) = pool.acquire(addr).await {
+            stream_opt = Some(s);
+        }
+    }
+
+    
+    if stream_opt.is_none() {
+        match connect_with_backoff(addr, timeout_ms, proxy_addr).await {
+            Ok(s) => stream_opt = Some(s),
+            Err(e) => {
+                if let Some(stats) = &error_stats {
+                    let scan_error = match e.kind() {
+                        std::io::ErrorKind::TimedOut => ScanError::Timeout { port, timeout: timeout_ms },
+                        std::io::ErrorKind::ConnectionRefused => ScanError::ConnectionFailed { target: ip, port, reason: "Connection Refused".to_string() },
+                        _ => ScanError::ConnectionFailed { target: ip, port, reason: e.to_string() },
+                    };
+                    stats.lock().await.record(&scan_error);
+                }
+                return match e.kind() {
+                    std::io::ErrorKind::ConnectionRefused => (PortState::Closed, None, Vec::new()),
+                    _ => (PortState::Filtered, None, Vec::new()),
+                };
+            }
+        }
+    }
+
+    let mut stream = stream_opt.unwrap();
+
+    
+    
+
+    
+    
+    {
             let mut banner = None;
             let mut dirs = Vec::new();
             if grab_banner {
-                let mut buffer = vec![0u8; 65536];
+                let mut buffer = vec![0u8; 4096]; 
                 let read_timeout = Duration::from_millis(timeout_ms);
                 
                 let mut total_read = 0;
@@ -124,11 +252,11 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
                     Ok(Ok(n)) if n > 0 => {
                         total_read += n;
                         while total_read < buffer.len() && start.elapsed() < read_timeout {
-                            // 动态计算剩余时间，避免超时
+                            
                             let elapsed = start.elapsed();
                             if elapsed >= read_timeout { break; }
                             let remaining = read_timeout - elapsed;
-                            // 每次读取最多等待 500ms 或剩余时间，取较小值
+                            
                             let wait_time = std::cmp::min(remaining, Duration::from_millis(500));
                             
                             match timeout(wait_time, stream.read(&mut buffer[total_read..])).await {
@@ -178,7 +306,7 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
                         } else if port == 2181 {
                             banner = probes::probe_zookeeper(&mut stream, &mut buffer, timeout_ms).await;
                         } else if [8000, 8080, 5005, 9000].contains(&port) {
-                            // JDWP 常见端口，优先尝试 JDWP，失败后再走 HTTP 流程
+                            
                             banner = probes::probe_jdwp(&mut stream, &mut buffer, timeout_ms).await;
                         } else if port == 1099 {
                             banner = probes::probe_rmi(&mut stream, &mut buffer, timeout_ms).await;
@@ -206,10 +334,10 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
                             let mut redirect_location = None;
                             if is_https_port || (deep_scan && banner.is_none()) {
                                 if let Ok(Ok(mut tls_stream)) = timeout(timeout_duration, async {
-                                    let connector = probes::get_tls_connector();
+                                    let connector = probes::get_tls_connector(insecure);
                                     let domain = ServerName::try_from(host.as_str()).unwrap_or(ServerName::try_from("example.com").unwrap());
-                                    // 使用 connect_with_backoff 替代直接 connect，确保在 Windows 下的稳定性
-                                    let tcp = connect_with_backoff(addr, timeout_ms).await?;
+                                    
+                                    let tcp = connect_with_backoff(addr, timeout_ms, proxy_addr).await?;
                                     connector.connect(domain, tcp).await
                                 }).await {
                                     tls_success = true;
@@ -220,7 +348,7 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
                                                 let issuer = x509.issuer().to_string();
                                                 let mut banner_str = format!("TLS: {} (Issuer: {})", subject, issuer);
                                                 
-                                                // 提取 SANs (Subject Alternative Names)
+                                                
                                                 let mut sans = Vec::new();
                                                 let extensions = x509.extensions();
                                                 for ext in extensions {
@@ -243,7 +371,7 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
                                                 }
                                                 
                                                 if !sans.is_empty() {
-                                                    // 去重并限制数量，避免输出过长
+                                                    
                                                     sans.sort();
                                                     sans.dedup();
                                                     let total_sans = sans.len();
@@ -283,7 +411,7 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
                                                 if deep_scan {
                                                     if http_banner.contains("Vue") || http_banner.contains("Element UI") {
                                                         let ua = probes::get_user_agent();
-                                                        if let Some(api_title) = probes::probe_ruoyi_api(ip, port, &host, true, timeout_ms, &ua).await {
+                                                        if let Some(api_title) = probes::probe_ruoyi_api(ip, port, &host, true, timeout_ms, &ua, insecure, proxy.clone(), rate_limiter.clone()).await {
                                                             if let Some(b) = banner {
                                                                 banner = Some(format!("{} | {}", b, api_title));
                                                             } else {
@@ -291,7 +419,7 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
                                                             }
                                                         }
                                                     }
-                                                    if let Some(fav) = probes::probe_favicon(ip, port, &host, true, timeout_ms).await {
+                                                    if let Some(fav) = probes::probe_favicon(ip, port, &host, true, timeout_ms, insecure, proxy.clone(), rate_limiter.clone()).await {
                                                         if let Some(b) = banner {
                                                             banner = Some(format!("{} | {}", b, fav));
                                                         } else {
@@ -311,7 +439,7 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
                                 
                                 let mut write_success = stream.write_all(req.as_bytes()).await.is_ok();
                                 if !write_success {
-                                    if let Ok(mut new_stream) = connect_with_backoff(addr, timeout_ms).await {
+                                    if let Ok(mut new_stream) = connect_with_backoff(addr, timeout_ms, proxy_addr).await {
                                         if new_stream.write_all(req.as_bytes()).await.is_ok() {
                                             stream = new_stream;
                                             write_success = true;
@@ -352,7 +480,7 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
                                                 
                                                 if is_vue {
                                                     let ua = probes::get_user_agent();
-                                                    if let Some(api_title) = probes::probe_ruoyi_api(ip, port, &host, false, timeout_ms, &ua).await {
+                                                    if let Some(api_title) = probes::probe_ruoyi_api(ip, port, &host, false, timeout_ms, &ua, insecure, proxy.clone(), rate_limiter.clone()).await {
                                                         if let Some(b) = banner {
                                                             banner = Some(format!("{} | {}", b, api_title));
                                                         } else {
@@ -361,7 +489,7 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
                                                     }
                                                 }
 
-                                                if let Some(fav) = probes::probe_favicon(ip, port, &host, false, timeout_ms).await {
+                                                if let Some(fav) = probes::probe_favicon(ip, port, &host, false, timeout_ms, insecure, proxy.clone(), rate_limiter.clone()).await {
                                                     if let Some(b) = banner {
                                                         banner = Some(format!("{} | {}", b, fav));
                                                     } else {
@@ -397,9 +525,9 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
                                     let req = format!("GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n", new_path, new_host, ua);
                                     
                                     if new_scheme == "https" {
-                                         if let Ok(tcp) = connect_with_backoff(new_addr, timeout_ms).await {
+                                         if let Ok(tcp) = connect_with_backoff(new_addr, timeout_ms, proxy_addr).await {
                                             if let Ok(Ok(mut tls_stream)) = timeout(timeout_duration, async {
-                                                let connector = probes::get_tls_connector();
+                                                let connector = probes::get_tls_connector(insecure);
                                                 let domain = ServerName::try_from(new_host.as_str()).unwrap_or(ServerName::try_from("example.com").unwrap());
                                                 connector.connect(domain, tcp).await
                                             }).await {
@@ -428,7 +556,7 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
                                                 }
                                                 if deep_scan && is_vue_app {
                                                     let ua = probes::get_user_agent();
-                                                    if let Some(api_title) = probes::probe_ruoyi_api(ip, new_port, &new_host, true, timeout_ms, &ua).await {
+                                                    if let Some(api_title) = probes::probe_ruoyi_api(ip, new_port, &new_host, true, timeout_ms, &ua, insecure, proxy.clone(), rate_limiter.clone()).await {
                                                         tls_banner_part.push_str(" | ");
                                                         tls_banner_part.push_str(&api_title);
                                                     }
@@ -439,7 +567,7 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
                                                 }
                                             }
                                          }
-                                    } else if let Ok(mut new_stream) = connect_with_backoff(new_addr, timeout_ms).await {
+                                    } else if let Ok(mut new_stream) = connect_with_backoff(new_addr, timeout_ms, proxy_addr).await {
                                         if new_stream.write_all(req.as_bytes()).await.is_ok() {
                                             if let Ok(Ok(n)) = timeout(read_timeout, new_stream.read(&mut buffer)).await {
                                                 if n > 0 {
@@ -453,7 +581,7 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
                                                     }
                                                     if deep_scan && is_vue_app {
                                                         let ua = probes::get_user_agent();
-                                                        if let Some(api_title) = probes::probe_ruoyi_api(ip, new_port, &new_host, false, timeout_ms, &ua).await {
+                                                        if let Some(api_title) = probes::probe_ruoyi_api(ip, new_port, &new_host, false, timeout_ms, &ua, insecure, proxy.clone(), rate_limiter.clone()).await {
                                                             if let Some(b) = banner { banner = Some(format!("{} | {}", b, api_title)); }
                                                             else { banner = Some(api_title); }
                                                         }
@@ -469,79 +597,79 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
                 }
             }
 
-            // 深度服务识别回退机制 (Deep Service Identification Fallback)
-            // 如果经过了被动 Banner 抓取和 HTTP/TLS 探测后仍未识别出服务，
-            // 且开启了 deep_scan，则尝试主动探测常见的“静默服务”。
-            // 这些服务通常不主动发送欢迎语，必须由客户端先发起握手。
+            
+            
+            
+            
             if banner.is_none() && deep_scan {
                 let mut buffer = vec![0u8; 4096];
                 
-                // 1. 尝试 Redis (高危，常见于非标准端口)
+                
                 if banner.is_none() {
-                    if let Ok(mut stream) = connect_with_backoff(addr, timeout_ms).await {
+                    if let Ok(mut stream) = connect_with_backoff(addr, timeout_ms, proxy_addr).await {
                         if let Some(res) = probes::probe_redis(&mut stream, &mut buffer, timeout_ms).await {
                             banner = Some(res);
                         }
                     }
                 }
 
-                // 2. 尝试 MongoDB (高危)
+                
                 if banner.is_none() {
-                    if let Ok(mut stream) = connect_with_backoff(addr, timeout_ms).await {
+                    if let Ok(mut stream) = connect_with_backoff(addr, timeout_ms, proxy_addr).await {
                         if let Some(res) = probes::probe_mongodb(&mut stream, &mut buffer, timeout_ms).await {
                             banner = Some(res);
                         }
                     }
                 }
 
-                // 3. 尝试 PostgreSQL (需主动发送 SSLRequest 或 StartupMessage)
+                
                 if banner.is_none() {
-                    if let Ok(mut stream) = connect_with_backoff(addr, timeout_ms).await {
+                    if let Ok(mut stream) = connect_with_backoff(addr, timeout_ms, proxy_addr).await {
                         if let Some(res) = probes::probe_postgresql(&mut stream, &mut buffer, timeout_ms).await {
                             banner = Some(res);
                         }
                     }
                 }
                 
-                // 4. 尝试 JDWP (再次尝试，防止之前因端口不匹配未触发)
+                
                 if banner.is_none() {
-                    if let Ok(mut stream) = connect_with_backoff(addr, timeout_ms).await {
+                    if let Ok(mut stream) = connect_with_backoff(addr, timeout_ms, proxy_addr).await {
                         if let Some(res) = probes::probe_jdwp(&mut stream, &mut buffer, timeout_ms).await {
                             banner = Some(res);
                         }
                     }
                 }
 
-                // 5. 尝试 SOCKS5
+                
                 if banner.is_none() {
-                    if let Ok(mut stream) = connect_with_backoff(addr, timeout_ms).await {
+                    if let Ok(mut stream) = connect_with_backoff(addr, timeout_ms, proxy_addr).await {
                         if let Some(res) = probes::probe_socks5(&mut stream, &mut buffer, timeout_ms).await {
                             banner = Some(res);
                         }
                     }
                 }
 
-                // 6. 尝试 RTSP
+                
                 if banner.is_none() {
-                    if let Ok(mut stream) = connect_with_backoff(addr, timeout_ms).await {
+                    if let Ok(mut stream) = connect_with_backoff(addr, timeout_ms, proxy_addr).await {
                         if let Some(res) = probes::probe_rtsp(&mut stream, &mut buffer, timeout_ms).await {
                             banner = Some(res);
                         }
                     }
                 }
 
-                // 7. 尝试 MQTT
+                
                 if banner.is_none() {
-                    if let Ok(mut stream) = connect_with_backoff(addr, timeout_ms).await {
+                    if let Ok(mut stream) = connect_with_backoff(addr, timeout_ms, proxy_addr).await {
                         if let Some(res) = probes::probe_mqtt(&mut stream, &mut buffer, timeout_ms).await {
                             banner = Some(res);
                         }
                     }
                 }
 
-                // 8. 尝试 AMQP
+                
                 if banner.is_none() {
-                    if let Ok(mut stream) = connect_with_backoff(addr, timeout_ms).await {
+                    if let Ok(mut stream) = connect_with_backoff(addr, timeout_ms, proxy_addr).await {
                         if let Some(res) = probes::probe_amqp(&mut stream, &mut buffer, timeout_ms).await {
                             banner = Some(res);
                         }
@@ -559,22 +687,19 @@ pub async fn scan_single_port(args: TcpScanArgs<'_>) -> (PortState, Option<Strin
                 };
 
                 if is_known_web_port || is_detected_http {
-                    dirs = crate::scanner::web_dir::scan_dirs(ip, port, &host, dir_paths, timeout_ms, banner.as_deref()).await;
+                    dirs = crate::scanner::web_dir::scan_dirs(ip, port, &host, dir_paths, timeout_ms, banner.as_deref(), insecure, proxy.clone(), rate_limiter.clone()).await;
                 }
             }
             
-            if let Ok(std_stream) = stream.into_std() {
-                 let socket = Socket::from(std_stream);
-                 let _ = socket.set_linger(Some(Duration::from_secs(0)));
+            if let Some(pool) = &connection_pool {
+                pool.release(addr, stream).await;
+            } else {
+                if let Ok(std_stream) = stream.into_std() {
+                     let socket = Socket::from(std_stream);
+                     let _ = socket.set_linger(Some(Duration::from_secs(0)));
+                }
             }
 
             (PortState::Open, banner, dirs)
-        },
-        Err(e) => {
-            match e.kind() {
-                std::io::ErrorKind::ConnectionRefused => (PortState::Closed, None, Vec::new()),
-                _ => (PortState::Filtered, None, Vec::new()),
-            }
-        },
     }
 }

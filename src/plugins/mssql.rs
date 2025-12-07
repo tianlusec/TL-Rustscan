@@ -1,11 +1,12 @@
-use super::{HostInfo, ScanPlugin, PluginType};
-use super::dicts::{COMMON_USERNAMES, COMMON_PASSWORDS};
+use super::dicts::{COMMON_PASSWORDS, COMMON_USERNAMES};
+use super::{HostInfo, PluginType, ScanPlugin};
 use anyhow::Result;
 use async_trait::async_trait;
-use tiberius::{Config, Client, AuthMethod};
+use std::time::Duration;
+use tiberius::{AuthMethod, Client, Config};
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
-use std::time::Duration;
+use tracing::info;
 
 pub struct MssqlPlugin;
 
@@ -27,11 +28,6 @@ impl ScanPlugin for MssqlPlugin {
         let host = info.host.clone();
         let port: u16 = info.port.parse().unwrap_or(1433);
 
-        // MSSQL 爆破
-        // 由于 tiberius 是异步的，我们可以直接在 async fn 中运行，不需要 spawn_blocking
-        // 但为了控制并发和超时，我们还是小心处理
-        
-        // 针对 MSSQL，常用的用户名通常是 sa
         let users = if COMMON_USERNAMES.contains(&"sa") {
             COMMON_USERNAMES.to_vec()
         } else {
@@ -46,30 +42,29 @@ impl ScanPlugin for MssqlPlugin {
                 config.host(&host);
                 config.port(port);
                 config.authentication(AuthMethod::sql_server(user, pass));
-                config.trust_cert(); // 忽略证书
+                config.trust_cert();
 
-                // 建立 TCP 连接
                 let tcp = match tokio::time::timeout(
                     Duration::from_secs(3),
-                    TcpStream::connect(format!("{}:{}", host, port))
-                ).await {
+                    TcpStream::connect(format!("{}:{}", host, port)),
+                )
+                .await
+                {
                     Ok(Ok(s)) => s,
-                    _ => return Ok(None), // 连接失败直接退出当前 host 的扫描
+                    _ => return Ok(None),
                 };
 
-                // 建立 TDS 连接
-                // tiberius 需要 compat 层
                 let tcp = tcp.compat_write();
-                
-                match tokio::time::timeout(
-                    Duration::from_secs(3),
-                    Client::connect(config, tcp)
-                ).await {
+
+                match tokio::time::timeout(Duration::from_secs(3), Client::connect(config, tcp))
+                    .await
+                {
                     Ok(Ok(_)) => {
-                        let msg = format!("[+] MSSQL 弱口令: {}:{} -> {}:{}", host, port, user, pass);
-                        println!("{}", msg);
+                        let msg =
+                            format!("[+] MSSQL 弱口令: {}:{} -> {}:{}", host, port, user, pass);
+                        info!("{}", msg);
                         return Ok(Some(msg));
-                    },
+                    }
                     _ => continue,
                 }
             }

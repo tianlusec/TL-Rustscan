@@ -1,8 +1,6 @@
-use super::{HostInfo, ScanPlugin, PluginType};
+use super::{HostInfo, PluginType, ScanPlugin};
 use anyhow::Result;
 use async_trait::async_trait;
-use reqwest::Client;
-use std::time::Duration;
 
 pub struct DockerPlugin;
 
@@ -21,18 +19,14 @@ impl ScanPlugin for DockerPlugin {
     }
 
     async fn scan(&self, info: &HostInfo) -> Result<Option<String>> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(3))
-            .danger_accept_invalid_certs(true)
-            .build()?;
+        let client = crate::scanner::probes::get_cached_http_client(3, true, info.proxy.clone());
 
         let url = format!("http://{}:{}/version", info.host, info.port);
-        
+
         if let Ok(mut resp) = client.get(&url).send().await {
-            // 修复: 限制读取大小，防止 OOM (限制 1MB)
             let mut body_bytes = Vec::new();
-            let max_len = 1024 * 1024; 
-            
+            let max_len = 1024 * 1024;
+
             while let Ok(Some(chunk)) = resp.chunk().await {
                 if body_bytes.len() + chunk.len() > max_len {
                     body_bytes.extend_from_slice(&chunk[..max_len - body_bytes.len()]);

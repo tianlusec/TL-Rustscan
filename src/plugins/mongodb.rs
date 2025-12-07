@@ -1,9 +1,13 @@
-use super::{HostInfo, ScanPlugin, PluginType};
-use super::dicts::{COMMON_USERNAMES, COMMON_PASSWORDS};
+use super::dicts::{COMMON_PASSWORDS, COMMON_USERNAMES};
+use super::{HostInfo, PluginType, ScanPlugin};
 use anyhow::Result;
 use async_trait::async_trait;
-use mongodb::{Client, options::{ClientOptions, Credential}};
+use mongodb::{
+    options::{ClientOptions, Credential},
+    Client,
+};
 use std::time::Duration;
+use tracing::info;
 
 pub struct MongodbPlugin;
 
@@ -26,23 +30,18 @@ impl ScanPlugin for MongodbPlugin {
         let port = info.port.parse::<u16>().unwrap_or(27017);
         let target = format!("{}:{}", host, port);
 
-        // 1. 尝试未授权访问
         let mut options = ClientOptions::parse(format!("mongodb://{}:{}", host, port)).await?;
         options.connect_timeout = Some(Duration::from_secs(3));
         options.server_selection_timeout = Some(Duration::from_secs(3));
-        
+
         if let Ok(client) = Client::with_options(options.clone()) {
-            // 尝试列出数据库名称，如果成功则说明未授权
             if client.list_database_names(None, None).await.is_ok() {
                 let msg = format!("[+] MongoDB 未授权访问: {}", target);
-                println!("{}", msg);
+                info!("{}", msg);
                 return Ok(Some(msg));
             }
         }
 
-        // 2. 尝试弱口令爆破
-        // MongoDB 默认没有 root 用户，常见的是 admin 库下的用户
-        // 我们尝试在 admin 数据库下认证
         let users = if COMMON_USERNAMES.contains(&"admin") {
             COMMON_USERNAMES.to_vec()
         } else {
@@ -63,11 +62,9 @@ impl ScanPlugin for MongodbPlugin {
                 auth_options.credential = Some(credential);
 
                 if let Ok(client) = Client::with_options(auth_options) {
-                    // 尝试执行一个简单的命令来验证认证
-                    // list_database_names 需要权限
                     if client.list_database_names(None, None).await.is_ok() {
                         let msg = format!("[+] MongoDB 弱口令: {} -> {}:{}", target, user, pass);
-                        println!("{}", msg);
+                        info!("{}", msg);
                         return Ok(Some(msg));
                     }
                 }

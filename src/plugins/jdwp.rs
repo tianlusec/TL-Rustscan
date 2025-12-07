@@ -1,9 +1,9 @@
-use super::{HostInfo, ScanPlugin, PluginType};
+use super::{HostInfo, PluginType, ScanPlugin};
 use anyhow::Result;
 use async_trait::async_trait;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use std::time::Duration;
 
 pub struct JdwpPlugin;
 
@@ -27,19 +27,24 @@ impl ScanPlugin for JdwpPlugin {
 
         match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr)).await {
             Ok(Ok(mut stream)) => {
-                // JDWP Handshake
-                // Client sends "JDWP-Handshake"
-                // Server responds "JDWP-Handshake"
                 let handshake = b"JDWP-Handshake";
-                
-                if tokio::time::timeout(Duration::from_secs(3), stream.write_all(handshake)).await.is_err() {
+
+                if tokio::time::timeout(Duration::from_secs(3), stream.write_all(handshake))
+                    .await
+                    .is_err()
+                {
                     return Ok(None);
                 }
 
                 let mut buf = [0u8; 14];
-                if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut buf)).await {
+                if let Ok(Ok(n)) =
+                    tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut buf)).await
+                {
                     if n == 14 && &buf == handshake {
-                        let msg = format!("[+] JDWP Service detected on {}\n[+] Vuln: JDWP RCE possible on {}", addr, addr);
+                        let msg = format!(
+                            "[+] JDWP Service detected on {}\n[+] Vuln: JDWP RCE possible on {}",
+                            addr, addr
+                        );
                         println!("{}", msg);
                         return Ok(Some(msg));
                     }

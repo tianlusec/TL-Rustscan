@@ -1,77 +1,108 @@
-name: Build and Release
+name: Build Release
 
 on:
   push:
-    branches: [ "main", "master" ]
     tags:
       - 'v*'
   workflow_dispatch:
 
-env:
-  CARGO_TERM_COLOR: always
-
-permissions:
-  contents: write
-
 jobs:
   build:
-    name: Build - ${{ matrix.platform.name }}
-    runs-on: ${{ matrix.platform.os }}
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        platform:
-          - name: Windows
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
-            bin: TL-Rustscan.exe
-            name_suffix: .exe
-          - name: Linux
-            os: ubuntu-latest
+        include:
+          - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            bin: TL-Rustscan
-            name_suffix: ""
-          - name: macOS
-            os: macos-13
+            artifact_name: TL-Rustscan
+            asset_name: TL-Rustscan-linux-x86_64
+          
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact_name: TL-Rustscan
+            asset_name: TL-Rustscan-linux-x86_64-musl
+          
+          - os: macos-latest
             target: x86_64-apple-darwin
-            bin: TL-Rustscan
-            name_suffix: ""
+            artifact_name: TL-Rustscan
+            asset_name: TL-Rustscan-macos-x86_64
+          
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: TL-Rustscan
+            asset_name: TL-Rustscan-macos-aarch64
+          
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: TL-Rustscan.exe
+            asset_name: TL-Rustscan-windows-x86_64.exe
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: ${{ matrix.platform.target }}
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
-    - name: Install dependencies (Linux)
-      if: matrix.platform.os == 'ubuntu-latest'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libssl-dev libssh2-1-dev pkg-config
+      - name: Install musl tools (Linux musl only)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
 
-    - name: Install dependencies (macOS)
-      if: matrix.platform.os == 'macos-13'
-      run: |
-        brew install openssl@3 libssh2 pkg-config
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Build Binary
-      run: cargo build --release --target ${{ matrix.platform.target }}
+      - name: Cache cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Rename Binary
-      shell: bash
-      run: |
-        cp target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }} TL-Rustscan-${{ matrix.platform.name }}${{ matrix.platform.name_suffix }}
+      - name: Cache target directory
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.target }}-target-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: TL-Rustscan-${{ matrix.platform.name }}
-        path: TL-Rustscan-${{ matrix.platform.name }}${{ matrix.platform.name_suffix }}
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
 
-    - name: Release
-      uses: softprops/action-gh-release@v1
-      if: startsWith(github.ref, 'refs/tags/')
-      with:
-        files: TL-Rustscan-${{ matrix.platform.name }}${{ matrix.platform.name_suffix }}
+      - name: Strip binary (Linux and macOS)
+        if: matrix.os != 'windows-latest'
+        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.asset_name }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/**/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

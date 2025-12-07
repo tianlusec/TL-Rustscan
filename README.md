@@ -1,4 +1,4 @@
-# TL-Rustscan v2.0 - 高性能异步端口扫描工具
+# TL-Rustscan v2.3.0 - 高性能异步端口扫描工具
 
 > **此工具由天禄实验室开发**
 
@@ -19,6 +19,8 @@
 *   **极速扫描**: 基于 Tokio 异步运行时，支持数千并发连接，秒级完成常见端口探测。
 *   **实时反馈**: 发现开放端口立即输出，无需等待扫描结束。
 *   **全端口覆盖**: 默认扫描 1-65535 全端口，不放过任何隐蔽服务。
+*   **代理支持**: 支持 SOCKS5 代理 (`--proxy`)，轻松穿透防火墙或隐藏扫描来源。
+*   **UDP 增强**: 内置 DNS, NTP, SNMP 等常见协议的专用探测载荷，大幅提升 UDP 端口识别准确率。
 *   **红队模式**: 提供 `--rscan` 参数，集成弱口令爆破（SSH, SMB, RDP 等）与高危漏洞检测（MS17-010, WebLogic 等），实现一键式内网打点。
 *   **智能协议识别**: 支持 RTSP, SOCKS5, MQTT, AMQP 等协议的主动探测，在无 Banner 时自动识别。
 *   **上下文感知爆破**: Web 目录扫描会根据识别到的指纹（如 Spring, PHP）自动加载特定敏感路径。
@@ -97,7 +99,14 @@ TL-Rustscan 192.168.1.10 -p 22,80,443,3389
 TL-Rustscan 192.168.1.0/24 -p 80,443
 ```
 
-### 4. 从文件导入目标
+### 4. 使用代理扫描
+支持通过 SOCKS5 代理进行扫描，隐藏真实 IP 或访问内网目标。
+
+```powershell
+TL-Rustscan 192.168.1.10 --proxy socks5://127.0.0.1:1080
+```
+
+### 5. 从文件导入目标
 当目标较多时，可以将目标写入文本文件（每行一个 IP、域名或网段），使用 `-L` 加载。
 
 **targets.txt 内容示例:**
@@ -112,7 +121,7 @@ db-server.local
 TL-Rustscan -L targets.txt -p 1-1000
 ```
 
-### 5. JSON 输出 (自动化集成)
+### 6. JSON 输出 (自动化集成)
 使用 `--json` 参数将结果以 JSON 格式输出，适合程序解析。
 
 ```powershell
@@ -123,7 +132,7 @@ TL-Rustscan 192.168.1.10 -p 80 --json
 TL-Rustscan 192.168.1.10 -o result.json
 ```
 
-### 6. 性能调优
+### 7. 性能调优
 *   **并发数 (`-C`)**: 默认为 200。网络状况好时可调高至 1000-2000 以加快速度。
 *   **超时时间 (`-t`)**: 默认为 500ms。内网环境可调低（如 200ms），公网或高延迟环境建议调高（如 1000ms）。
 *   **跳过复查 (`-x`)**: 默认情况下，工具会对超时端口进行智能复查以防止漏报。如果你追求极致速度，可以使用 `-x` 关闭此功能。
@@ -133,7 +142,7 @@ TL-Rustscan 192.168.1.10 -o result.json
 TL-Rustscan 10.0.0.0/16 -p 80 -C 2000 -t 200 -x
 ```
 
-### 7. 服务指纹与 Web 标题识别
+### 8. 服务指纹与 Web 标题识别
 使用 `-b` 或 `--banner` 参数，工具会：
 1.  尝试读取服务欢迎语（如 SSH, FTP, MySQL, PostgreSQL, RDP）。
 2.  如果是 Web 服务，会自动发送请求并提取 **网页标题 (Title)** 以及 **Web 框架指纹** (如 Spring Boot, Laravel, Vue 等)。
@@ -149,14 +158,14 @@ TL-Rustscan 192.168.1.10 -p 80,8080,22,3306 -b
 192.168.1.10:3306 is open (MySQL 5.7.33-log)
 ```
 
-### 8. 生成 Markdown 报告
+### 9. 生成 Markdown 报告
 使用 `--output-markdown <FILE>` 参数，可以将扫描结果保存为美观的 Markdown 格式，方便直接复制到笔记或报告中。
 
 ```powershell
 TL-Rustscan 192.168.1.0/24 -p 80,443 -b --output-markdown report.md
 ```
 
-### 9. UDP 扫描
+### 10. UDP 扫描
 使用 `--udp` 参数开启 UDP 扫描模式。
 注意：UDP 扫描速度较慢且不可靠，建议只针对特定端口（如 DNS 53, NTP 123, SNMP 161）使用。
 
@@ -164,7 +173,7 @@ TL-Rustscan 192.168.1.0/24 -p 80,443 -b --output-markdown report.md
 TL-Rustscan 192.168.1.1 -p 53,123,161 --udp
 ```
 
-### 10. 主机存活检测 (Host Discovery)
+### 11. 主机存活检测 (Host Discovery)
 使用 `--check` 参数，在扫描端口前先对目标进行存活检测（Ping/Connect）。
 这对于扫描大网段非常有用，可以自动跳过不在线的主机，大幅节省时间。
 
@@ -173,7 +182,7 @@ TL-Rustscan 192.168.1.1 -p 53,123,161 --udp
 TL-Rustscan 10.0.0.0/16 -p 80 --check
 ```
 
-### 11. Web 目录爆破
+### 12. Web 目录爆破
 使用 `--dir` 参数开启 Web 目录爆破功能。
 当扫描到 Web 端口 (80, 443, 8080 等) 时，会自动尝试探测常见路径（内置 300,000+ 条高价值字典，涵盖 `/admin`, `/login`, `/backup` 及各类备份文件）。
 
@@ -184,6 +193,11 @@ TL-Rustscan 192.168.1.10 -p 80,8080 --dir
 你也可以使用 `--paths` 指定自定义字典文件：
 ```powershell
 TL-Rustscan 192.168.1.10 -p 80 --dir --paths my_dict.txt
+```
+
+你也可以使用 `--dir-concurrency` 控制目录扫描的并发数（默认 50）：
+```powershell
+TL-Rustscan 192.168.1.10 -p 80 --dir --dir-concurrency 100
 ```
 
 如果你想在非标准端口（如 12345）上启用目录爆破，可以使用 `--dir-ports`：
@@ -345,25 +359,88 @@ TL-Rustscan --dump-json
 
 ```text
 TL-Rustscan/
+├── .github/                # GitHub 配置
+│   ├── workflows/          # GitHub Actions 工作流
+│   │   └── build.yml       # 自动编译多平台可执行文件
+│   ├── ISSUE_TEMPLATE/     # Issue 模板
+│   └── PULL_REQUEST_TEMPLATE.md # PR 模板
 ├── src/                    # Rust 源代码目录
 │   ├── scanner/            # 核心扫描模块
+│   │   ├── mod.rs          # 扫描器主模块
 │   │   ├── tcp_connect.rs  # TCP 端口扫描实现
 │   │   ├── udp_scan.rs     # UDP 端口扫描实现
+│   │   ├── udp_config.rs   # UDP 扫描配置
 │   │   ├── probes.rs       # 服务指纹探测与识别
 │   │   ├── web_dir.rs      # Web 目录爆破
-│   │   └── ...
+│   │   ├── fingerprint_db.rs # 指纹数据库管理
+│   │   ├── host_discovery.rs # 主机存活检测
+│   │   ├── adaptive.rs     # 自适应并发控制
+│   │   ├── connection_pool.rs # TCP 连接池
+│   │   ├── scan_cache.rs   # 扫描结果缓存
+│   │   ├── checkpoint.rs   # 断点续扫
+│   │   ├── streaming_output.rs # 流式输出
+│   │   ├── service_map.rs  # 服务映射
+│   │   └── constants.rs    # 常量定义
+│   ├── plugins/            # 插件模块
+│   │   ├── mod.rs          # 插件管理器
+│   │   ├── ssh.rs          # SSH 弱口令爆破
+│   │   ├── redis.rs        # Redis 未授权/弱口令
+│   │   ├── mysql.rs        # MySQL 弱口令
+│   │   ├── mssql.rs        # MSSQL 弱口令
+│   │   ├── postgres.rs     # PostgreSQL 弱口令
+│   │   ├── mongodb.rs      # MongoDB 未授权/弱口令
+│   │   ├── ftp.rs          # FTP 弱口令
+│   │   ├── telnet.rs       # Telnet 弱口令
+│   │   ├── smb.rs          # SMB 弱口令
+│   │   ├── rdp.rs          # RDP 检测
+│   │   ├── vnc.rs          # VNC 弱口令
+│   │   ├── ms17010.rs      # MS17-010 漏洞检测
+│   │   ├── web_pocs.rs     # Web 漏洞 POC
+│   │   ├── web_fingerprints.rs # Web 指纹识别
+│   │   ├── webtitle.rs     # Web 标题获取
+│   │   ├── memcached.rs    # Memcached 检测
+│   │   ├── elasticsearch.rs # Elasticsearch 检测
+│   │   ├── zookeeper.rs    # Zookeeper 检测
+│   │   ├── docker.rs       # Docker 检测
+│   │   ├── netbios.rs      # NetBIOS 信息收集
+│   │   ├── snmp.rs         # SNMP 检测
+│   │   ├── oracle.rs       # Oracle 检测
+│   │   ├── fcgi.rs         # FastCGI 检测
+│   │   ├── ldap.rs         # LDAP 检测
+│   │   ├── jdwp.rs         # JDWP 检测
+│   │   └── dicts.rs        # 弱口令字典
 │   ├── config.rs           # 命令行参数解析与配置管理
 │   ├── main.rs             # 程序入口
-│   ├── output.rs           # 多格式结果输出 (JSON, CSV, HTML 等)
-│   └── target.rs           # 目标解析逻辑 (CIDR, 域名, IP范围)
+│   ├── output.rs           # 多格式结果输出 (JSON, CSV, HTML, Markdown)
+│   ├── target.rs           # 目标解析逻辑 (CIDR, 域名, IP范围)
+│   └── error.rs            # 错误处理模块
+├── docs/                   # 文档目录
+│   ├── FEATURES.md         # 功能特性文档
+│   ├── DEVELOPMENT.md      # 开发指南
+│   └── TESTING.md          # 测试指南
 ├── scripts/                # 辅助工具脚本
 │   ├── update_fingerprints.py # 指纹库更新脚本 (Wappalyzer/Nuclei/Recog)
-│   └── import_fingerprints.py # 自定义指纹导入脚本 (支持 Finger/Ehole 格式)
+│   ├── import_fingerprints.py # 自定义指纹导入脚本 (支持 Finger/Ehole 格式)
+│   └── fetch_and_merge.py  # 指纹数据获取与合并
+├── imports/                # 导入数据目录
+│   └── finger_custom.json  # 自定义指纹数据
 ├── tests/                  # 测试用例
+│   └── integration_test.py # 集成测试
 ├── Cargo.toml              # 项目依赖配置
+├── Cargo.lock              # 依赖锁定文件
+├── build.rs                # 构建脚本
 ├── build.bat               # Windows 快速构建脚本
 ├── build.sh                # Linux/macOS 快速构建脚本
-└── Dockerfile              # Docker 部署文件
+├── Dockerfile              # Docker 部署文件
+├── LICENSE                 # MIT 许可证
+├── README.md               # 中文说明文档
+├── README_EN.md            # 英文说明文档
+├── CHANGELOG.md            # 中文更新日志
+├── CHANGELOG_EN.md         # 英文更新日志
+├── CONTRIBUTING.md         # 中文贡献指南
+├── CONTRIBUTING_EN.md      # 英文贡献指南
+├── fingerprints.json       # 指纹数据库文件
+└── .gitignore              # Git 忽略规则
 ```
 
 ## 常见问题
@@ -379,4 +456,16 @@ A: 建议使用 `--json` 或 `-o result.json` 将结果保存到文件查看。
 
 **Q: Windows 下扫描大量端口时报错？**
 A: 本工具已针对 Windows 做了优化，但如果并发过高仍可能受限于系统 TCP 连接数限制。尝试降低并发数 `-C 500`。
+
+## 📚 详细文档
+
+更多详细信息请参考 `docs/` 目录下的文档：
+
+*   [功能特性 (FEATURES.md)](docs/FEATURES.md)
+*   [开发指南 (DEVELOPMENT.md)](docs/DEVELOPMENT.md)
+*   [测试指南 (TESTING.md)](docs/TESTING.md)
+*   [API 文档 (API.md)](docs/API.md)
+*   [架构设计 (ARCHITECTURE.md)](docs/ARCHITECTURE.md)
+*   [安全指南 (SECURITY.md)](docs/SECURITY.md)
+*   [项目结构 (PROJECT_STRUCTURE.md)](docs/PROJECT_STRUCTURE.md)
 

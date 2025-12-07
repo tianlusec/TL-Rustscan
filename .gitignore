@@ -39,6 +39,14 @@ seeyon_*.txt
 update_dict.ps1
 test_*.pdb
 
+# Development and optimization docs (temporary)
+*_OPTIMIZATION.md
+*_PROGRESS.md
+*_COMPLETE.md
+*_SUMMARY.md
+CLEANUP_PLAN.md
+bug.txt
+
 # Keep these
 !fingerprints.json
 # Ignore imports folder

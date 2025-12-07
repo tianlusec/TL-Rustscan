@@ -1,70 +1,60 @@
-pub mod redis;
-pub mod webtitle;
-pub mod ssh;
-pub mod mysql;
-pub mod ms17010;
+pub mod dicts;
+pub mod docker;
+pub mod elasticsearch;
+pub mod fcgi;
 pub mod ftp;
+pub mod jdwp;
+pub mod ldap;
 pub mod memcached;
 pub mod mongodb;
-pub mod elasticsearch;
-pub mod zookeeper;
-pub mod docker;
-pub mod telnet;
+pub mod ms17010;
 pub mod mssql;
+pub mod mysql;
+pub mod netbios;
+pub mod oracle;
 pub mod postgres;
-pub mod dicts;
+pub mod rdp;
+pub mod redis;
+pub mod smb;
+pub mod snmp;
+pub mod ssh;
+pub mod telnet;
+pub mod vnc;
 pub mod web_fingerprints;
 pub mod web_pocs;
-pub mod netbios;
-pub mod snmp;
-pub mod rdp;
-pub mod smb;
-pub mod oracle;
-pub mod fcgi;
-pub mod vnc;
-pub mod ldap;
-pub mod jdwp;
+pub mod webtitle;
+pub mod zookeeper;
 
-use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginType {
-    Brute, // 弱口令爆破
-    Poc,   // 漏洞检测
-    Info,  // 信息收集 (WebTitle, NetBIOS)
+    Brute,
+    Poc,
+    Info,
 }
 
-// 对应 fscan Common/Types.go 中的 HostInfo
 #[derive(Debug, Clone)]
 pub struct HostInfo {
     pub host: String,
-    pub port: String, // fscan 使用 string 存储端口
+    pub port: String,
     pub url: String,
     pub infostr: Vec<String>,
+    pub proxy: Option<String>,
 }
 
-// 对应 fscan Common/Types.go 中的 ScanPlugin
-// 在 Rust 中我们使用 Trait 来定义接口
 #[async_trait]
 pub trait ScanPlugin: Send + Sync {
-    // 插件名称
     fn name(&self) -> &str;
-    
-    // 适用端口，对应 fscan 的 Ports []int
+
     fn interested_ports(&self) -> Vec<u16>;
-    
-    // 扫描逻辑，对应 fscan 的 ScanFunc
-    // 修改返回值，允许返回漏洞信息字符串
+
     async fn scan(&self, info: &HostInfo) -> Result<Option<String>>;
 
-    // 插件类型
     fn plugin_type(&self) -> PluginType;
 
-    // 是否为 rscan 专属功能 (默认为 true)
-    // 如果为 true，则只有在开启 --rscan 时才会运行
-    // 如果为 false，则默认运行 (如 WebTitle)
     fn is_rscan_only(&self) -> bool {
         match self.plugin_type() {
             PluginType::Brute | PluginType::Poc => true,
@@ -73,15 +63,15 @@ pub trait ScanPlugin: Send + Sync {
     }
 }
 
-// 插件管理器，对应 fscan Core/Registry.go
 pub struct PluginManager {
     plugins: Vec<Arc<dyn ScanPlugin>>,
 }
 
 impl PluginManager {
     pub fn new() -> Self {
-        let mut pm = Self { plugins: Vec::new() };
-        // 注册默认插件
+        let mut pm = Self {
+            plugins: Vec::new(),
+        };
         pm.register(Arc::new(redis::RedisPlugin));
         pm.register(Arc::new(webtitle::WebTitlePlugin));
         pm.register(Arc::new(ssh::SshPlugin));
@@ -114,7 +104,6 @@ impl PluginManager {
         self.plugins.push(plugin);
     }
 
-    // 根据端口获取合适的插件
     pub fn get_plugins_for_port(&self, port: u16) -> Vec<Arc<dyn ScanPlugin>> {
         self.plugins
             .iter()

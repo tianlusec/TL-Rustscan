@@ -3,7 +3,7 @@ import json
 import urllib.request
 import sys
 
-# Ensure we can import import_fingerprints from the same directory
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
@@ -17,7 +17,7 @@ URLS = [
 def download_file(url, dest):
     print(f"Downloading {url}...")
     try:
-        # Add User-Agent to avoid 403
+        
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req) as response, open(dest, 'wb') as out_file:
             out_file.write(response.read())
@@ -45,8 +45,8 @@ def main():
             print(f"Merging {url}...")
             try:
                 external_rules = import_fingerprints.load_json(temp_path)
-                # merge_rules(builtin, external) -> returns (merged, added, skipped)
-                # We treat current_rules as builtin
+                
+                
                 merged, added, skipped = import_fingerprints.merge_rules(current_rules, external_rules)
                 print(f"  -> Added {added} new rules (Skipped {skipped} invalid/duplicate items)")
                 current_rules = merged

@@ -1,10 +1,12 @@
-use serde::Deserialize;
-use serde::de::Error as SerdeError;
-use std::sync::OnceLock;
-use regex::Regex;
-use std::path::PathBuf;
-use std::fs;
 use aho_corasick::AhoCorasick;
+use regex::Regex;
+use serde::de::Error as SerdeError;
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Fingerprint {
@@ -42,8 +44,11 @@ pub enum MatchLocation {
 
 #[derive(Debug, Clone)]
 pub struct FingerprintDatabase {
-    pub regex_rules: Vec<CompiledFingerprint>,
-    
+    pub regex_rules_body: Vec<CompiledFingerprint>,
+    pub regex_rules_header: Vec<CompiledFingerprint>,
+    pub regex_rules_title: Vec<CompiledFingerprint>,
+    pub regex_rules_banner: Vec<CompiledFingerprint>,
+
     pub keyword_rules_body: Vec<CompiledFingerprint>,
     pub keyword_rules_header: Vec<CompiledFingerprint>,
     pub keyword_rules_title: Vec<CompiledFingerprint>,
@@ -56,15 +61,27 @@ pub struct FingerprintDatabase {
     pub ac_banner: Option<AhoCorasick>,
 }
 
+use tracing::{error, info};
+
 static DB: OnceLock<FingerprintDatabase> = OnceLock::new();
 
 impl FingerprintDatabase {
-    pub fn init(path: Option<PathBuf>) -> Result<(), String> {
+    pub fn init(path: Option<PathBuf>) {
         let db = if let Some(p) = path {
-            let content = fs::read_to_string(&p).map_err(|e| format!("无法读取指纹文件 {:?}: {}", p, e))?;
-            Self::load_from_str(&content).map_err(|e| format!("解析指纹文件失败: {}", e))?
+            match fs::read_to_string(&p) {
+                Ok(content) => match Self::load_from_str(&content) {
+                    Ok(db) => db,
+                    Err(e) => {
+                        error!("解析指纹文件失败: {}, 将使用内置指纹库", e);
+                        Self::load_default()
+                    }
+                },
+                Err(e) => {
+                    error!("无法读取指纹文件 {:?}: {}, 将使用内置指纹库", p, e);
+                    Self::load_default()
+                }
+            }
         } else {
-            // 优先尝试加载可执行文件所在目录下的 fingerprints.json
             let mut target_path = None;
             if let Ok(exe_path) = std::env::current_exe() {
                 if let Some(exe_dir) = exe_path.parent() {
@@ -74,25 +91,36 @@ impl FingerprintDatabase {
                     }
                 }
             }
-            
-            // 如果 exe 目录下没有，再尝试当前工作目录
+
             if target_path.is_none() {
-                let p = std::env::current_dir().unwrap_or_default().join("fingerprints.json");
+                let p = std::env::current_dir()
+                    .unwrap_or_default()
+                    .join("fingerprints.json");
                 if p.exists() {
                     target_path = Some(p);
                 }
             }
 
             if let Some(path) = target_path {
-                eprintln!("[*] 自动加载外部指纹库: {:?}", path);
-                let content = fs::read_to_string(&path).map_err(|e| format!("无法读取本地指纹文件: {}", e))?;
-                Self::load_from_str(&content).map_err(|e| format!("解析本地指纹文件失败: {}", e))?
+                info!("自动加载外部指纹库: {:?}", path);
+                match fs::read_to_string(&path) {
+                    Ok(content) => match Self::load_from_str(&content) {
+                        Ok(db) => db,
+                        Err(e) => {
+                            error!("解析本地指纹文件失败: {}, 将使用内置指纹库", e);
+                            Self::load_default()
+                        }
+                    },
+                    Err(e) => {
+                        error!("无法读取本地指纹文件: {}, 将使用内置指纹库", e);
+                        Self::load_default()
+                    }
+                }
             } else {
                 Self::load_default()
             }
         };
         let _ = DB.set(db);
-        Ok(())
     }
 
     pub fn dump_default_to_file(path: &PathBuf) -> std::io::Result<()> {
@@ -105,17 +133,35 @@ impl FingerprintDatabase {
         match Self::load_from_str(json) {
             Ok(db) => db,
             Err(e) => {
-                eprintln!("错误: 内置指纹库解析失败: {}", e);
-                eprintln!("请检查 fingerprints.json 的格式是否正确。");
-                std::process::exit(1);
+                error!("内置指纹库解析失败: {}", e);
+                error!("将使用空指纹库继续运行。");
+                FingerprintDatabase {
+                    regex_rules_body: Vec::new(),
+                    regex_rules_header: Vec::new(),
+                    regex_rules_title: Vec::new(),
+                    regex_rules_banner: Vec::new(),
+                    keyword_rules_body: Vec::new(),
+                    keyword_rules_header: Vec::new(),
+                    keyword_rules_title: Vec::new(),
+                    keyword_rules_banner: Vec::new(),
+                    favicon_rules: HashMap::new(),
+                    ac_body: None,
+                    ac_header: None,
+                    ac_title: None,
+                    ac_banner: None,
+                }
             }
         }
     }
 
     fn load_from_str(json: &str) -> Result<FingerprintDatabase, serde_json::Error> {
         let raw_rules: Vec<Fingerprint> = serde_json::from_str(json)?;
-        
-        let mut regex_rules = Vec::new();
+
+        let mut regex_rules_body = Vec::new();
+        let mut regex_rules_header = Vec::new();
+        let mut regex_rules_title = Vec::new();
+        let mut regex_rules_banner = Vec::new();
+
         let mut keyword_rules_body = Vec::new();
         let mut keyword_rules_header = Vec::new();
         let mut keyword_rules_title = Vec::new();
@@ -125,14 +171,12 @@ impl FingerprintDatabase {
         let mut skipped_count = 0;
 
         for mut r in raw_rules {
-            // 过滤无效或过于通用的规则
             let p_lower = r.pattern.to_lowercase();
             let name_lower = r.name.to_lowercase();
-            
-            // 1. 过滤过于通用的模式
-            if r.pattern.trim().is_empty() 
-                || p_lower.contains("text/html") 
-                || p_lower == "<html" 
+
+            if r.pattern.trim().is_empty()
+                || p_lower.contains("text/html")
+                || p_lower == "<html"
                 || p_lower == "<body"
                 || p_lower == "index.jsp"
                 || p_lower.contains("(v[0-9.]+)")
@@ -168,7 +212,6 @@ impl FingerprintDatabase {
                 continue;
             }
 
-            // 2. 过滤特定的噪音指纹名称
             if name_lower.contains("wappalyzer technology detection")
                 || name_lower.contains("mcp inspector detect")
                 || name_lower.contains("kubelet healthz")
@@ -183,14 +226,16 @@ impl FingerprintDatabase {
                 || name_lower.contains("nginx with version info")
                 || name_lower.contains("nginx without version info")
                 || name_lower.contains("symfony default page")
-                || name_lower == "nginx" // 仅过滤纯 "Nginx" 名称，保留具体的 Nginx 模块或版本指纹
+                || name_lower == "nginx"
             {
                 skipped_count += 1;
                 continue;
             }
 
-            // 3. 过滤过于短的关键词 (除非是 FaviconHash)
-            if r.location != MatchLocation::FaviconHash && r.match_mode == MatchMode::Keyword && r.pattern.len() < 4 {
+            if r.location != MatchLocation::FaviconHash
+                && r.match_mode == MatchMode::Keyword
+                && r.pattern.len() < 4
+            {
                 skipped_count += 1;
                 continue;
             }
@@ -205,14 +250,14 @@ impl FingerprintDatabase {
             let regex = if r.match_mode == MatchMode::Regex {
                 regex::RegexBuilder::new(&r.pattern)
                     .case_insensitive(true)
-                    .size_limit(10 * 1024 * 1024) // 10MB limit to prevent DoS
+                    .size_limit(10 * 1024 * 1024) 
                     .build()
                     .ok()
             } else {
                 r.pattern = r.pattern.to_lowercase();
                 None
             };
-            
+
             let compiled = CompiledFingerprint {
                 name: r.name,
                 match_mode: r.match_mode.clone(),
@@ -222,7 +267,13 @@ impl FingerprintDatabase {
             };
 
             if compiled.match_mode == MatchMode::Regex {
-                regex_rules.push(compiled);
+                match compiled.location {
+                    MatchLocation::Body => regex_rules_body.push(compiled),
+                    MatchLocation::Header => regex_rules_header.push(compiled),
+                    MatchLocation::Title => regex_rules_title.push(compiled),
+                    MatchLocation::Banner => regex_rules_banner.push(compiled),
+                    _ => {}
+                }
             } else {
                 match compiled.location {
                     MatchLocation::Body => keyword_rules_body.push(compiled),
@@ -235,28 +286,65 @@ impl FingerprintDatabase {
         }
 
         if skipped_count > 0 {
-            // 仅在调试模式或 verbose 模式下显示，或者只显示一次
-            // eprintln!("[*] 已过滤 {} 条过于通用的指纹规则", skipped_count);
         }
 
         let ac_body = if !keyword_rules_body.is_empty() {
-            Some(AhoCorasick::new(keyword_rules_body.iter().map(|r| &r.pattern)).map_err(|e| serde_json::Error::custom(format!("Failed to build AC automaton for body: {}", e)))?)
-        } else { None };
+            Some(
+                AhoCorasick::new(keyword_rules_body.iter().map(|r| &r.pattern)).map_err(|e| {
+                    serde_json::Error::custom(format!(
+                        "Failed to build AC automaton for body: {}",
+                        e
+                    ))
+                })?,
+            )
+        } else {
+            None
+        };
 
         let ac_header = if !keyword_rules_header.is_empty() {
-            Some(AhoCorasick::new(keyword_rules_header.iter().map(|r| &r.pattern)).map_err(|e| serde_json::Error::custom(format!("Failed to build AC automaton for header: {}", e)))?)
-        } else { None };
+            Some(
+                AhoCorasick::new(keyword_rules_header.iter().map(|r| &r.pattern)).map_err(|e| {
+                    serde_json::Error::custom(format!(
+                        "Failed to build AC automaton for header: {}",
+                        e
+                    ))
+                })?,
+            )
+        } else {
+            None
+        };
 
         let ac_title = if !keyword_rules_title.is_empty() {
-            Some(AhoCorasick::new(keyword_rules_title.iter().map(|r| &r.pattern)).map_err(|e| serde_json::Error::custom(format!("Failed to build AC automaton for title: {}", e)))?)
-        } else { None };
+            Some(
+                AhoCorasick::new(keyword_rules_title.iter().map(|r| &r.pattern)).map_err(|e| {
+                    serde_json::Error::custom(format!(
+                        "Failed to build AC automaton for title: {}",
+                        e
+                    ))
+                })?,
+            )
+        } else {
+            None
+        };
 
         let ac_banner = if !keyword_rules_banner.is_empty() {
-            Some(AhoCorasick::new(keyword_rules_banner.iter().map(|r| &r.pattern)).map_err(|e| serde_json::Error::custom(format!("Failed to build AC automaton for banner: {}", e)))?)
-        } else { None };
+            Some(
+                AhoCorasick::new(keyword_rules_banner.iter().map(|r| &r.pattern)).map_err(|e| {
+                    serde_json::Error::custom(format!(
+                        "Failed to build AC automaton for banner: {}",
+                        e
+                    ))
+                })?,
+            )
+        } else {
+            None
+        };
 
-        Ok(FingerprintDatabase { 
-            regex_rules,
+        Ok(FingerprintDatabase {
+            regex_rules_body,
+            regex_rules_header,
+            regex_rules_title,
+            regex_rules_banner,
             keyword_rules_body,
             keyword_rules_header,
             keyword_rules_title,
@@ -270,9 +358,7 @@ impl FingerprintDatabase {
     }
 
     pub fn global() -> &'static FingerprintDatabase {
-        DB.get_or_init(|| {
-            Self::load_default()
-        })
+        DB.get_or_init(|| Self::load_default())
     }
 
     pub fn match_favicon(&self, hash: i32) -> Option<String> {
@@ -281,12 +367,11 @@ impl FingerprintDatabase {
 
     pub fn match_http(&self, body: &str, headers: &str, title: &str) -> Vec<String> {
         let mut matches = Vec::new();
-        
+
         let body_lower = body.to_lowercase();
         let headers_lower = headers.to_lowercase();
         let title_lower = title.to_lowercase();
 
-        // 1. Keyword Matching (Aho-Corasick) - O(N)
         if let Some(ac) = &self.ac_body {
             for mat in ac.find_iter(&body_lower) {
                 matches.push(self.keyword_rules_body[mat.pattern()].name.clone());
@@ -303,40 +388,43 @@ impl FingerprintDatabase {
             }
         }
 
-        // 2. Regex Matching - O(M * N)
-        for rule in &self.regex_rules {
-            let target_text = match rule.location {
-                MatchLocation::Body => body,
-                MatchLocation::Header => headers,
-                MatchLocation::Title => title,
-                MatchLocation::Banner => continue,
-                MatchLocation::FaviconHash => continue,
-            };
-
+        for rule in &self.regex_rules_body {
             if let Some(re) = &rule.regex {
-                if re.is_match(target_text) {
+                if re.is_match(body) {
                     matches.push(rule.name.clone());
                 }
             }
         }
+
+        for rule in &self.regex_rules_header {
+            if let Some(re) = &rule.regex {
+                if re.is_match(headers) {
+                    matches.push(rule.name.clone());
+                }
+            }
+        }
+
+        for rule in &self.regex_rules_title {
+            if let Some(re) = &rule.regex {
+                if re.is_match(title) {
+                    matches.push(rule.name.clone());
+                }
+            }
+        }
+
         matches
     }
 
     pub fn match_service_banner(&self, banner: &str) -> Option<String> {
         let banner_lower = banner.to_lowercase();
-        
-        // Keyword
+
         if let Some(ac) = &self.ac_banner {
             if let Some(mat) = ac.find(&banner_lower) {
                 return Some(self.keyword_rules_banner[mat.pattern()].name.clone());
             }
         }
 
-        // Regex
-        for rule in &self.regex_rules {
-            if rule.location != MatchLocation::Banner {
-                continue;
-            }
+        for rule in &self.regex_rules_banner {
             if let Some(re) = &rule.regex {
                 if re.is_match(banner) {
                     return Some(rule.name.clone());
@@ -356,15 +444,16 @@ mod tests {
     fn validate_all_fingerprints() {
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         path.push("fingerprints.json");
-        
+
         if !path.exists() {
             println!("Skipping test: fingerprints.json not found at {:?}", path);
             return;
         }
 
         let content = std::fs::read_to_string(&path).expect("Failed to read fingerprints.json");
-        let raw_rules: Vec<Fingerprint> = serde_json::from_str(&content).expect("Failed to parse JSON");
-        
+        let raw_rules: Vec<Fingerprint> =
+            serde_json::from_str(&content).expect("Failed to parse JSON");
+
         let mut failed_count = 0;
         for rule in raw_rules {
             if rule.match_mode == MatchMode::Regex {
@@ -378,7 +467,10 @@ mod tests {
         }
 
         if failed_count > 0 {
-            panic!("Found {} invalid regexes in fingerprints.json. Please fix them.", failed_count);
+            panic!(
+                "Found {} invalid regexes in fingerprints.json. Please fix them.",
+                failed_count
+            );
         } else {
             println!("All regexes in fingerprints.json are valid!");
         }

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 import json
 import re
 import sys
@@ -12,25 +12,25 @@ ALLOWED_LOCATIONS = {'body', 'header', 'title', 'banner'}
 
 def is_valid_rust_regex(pattern):
     try:
-        # Reject lookarounds
+        
         if '(?=' in pattern or '(?!' in pattern or '(?<=' in pattern or '(?<!' in pattern:
             return False
-        # Reject backreferences like \1
+        
         if re.search(r'(?<!\\)\\[1-9]', pattern):
             return False
-        # Reject Wappalyzer style ;version: suffix
+        
         if ";version:" in pattern:
             return False
-        # Reject malformed quantifier {,N}
+        
         if re.search(r'\{,\d+\}', pattern):
             return False
-        # Reject unclosed char class
+        
         if "[^]" in pattern:
             return False
-        # Reject '{' followed by a letter/quote/brace (heuristic)
+        
         if re.search(r'(?<!\\)\{(?:["a-zA-Z{])', pattern):
             return False
-        # Basic Python re compilation check
+        
         re.compile(pattern)
         return True
     except re.error:
@@ -40,30 +40,30 @@ def is_valid_rust_regex(pattern):
 def load_json(path):
     with open(path, 'r', encoding='utf-8') as f:
         data = json.load(f)
-        # Handle format: {"fingerprint": [...]}
+        
         if isinstance(data, dict) and "fingerprint" in data:
             return data["fingerprint"]
-        # Handle format: [...]
+        
         if isinstance(data, list):
             return data
         return []
 
 def validate_rule(r):
-    # Map external keys to internal keys
-    # External: cms, method, location, keyword
-    # Internal: name, match_mode, location, pattern
+    
+    
+    
     
     name = r.get('cms') or r.get('name')
     method = r.get('method') or r.get('match_mode')
     location = r.get('location')
-    # keyword can be a list or string in external format
+    
     pattern = r.get('keyword') or r.get('pattern')
 
-    # --- Support for FingerprintHub format (name, keyword[], headers{}) ---
+    
     if name and not method and not location:
         rules_to_add = []
         
-        # 1. Handle keywords (Body)
+        
         if pattern and isinstance(pattern, list):
             for p in pattern:
                 rules_to_add.append({
@@ -73,14 +73,14 @@ def validate_rule(r):
                     'pattern': p
                 })
         
-        # 2. Handle headers
+        
         headers = r.get('headers')
         if headers and isinstance(headers, dict):
             for k, v in headers.items():
-                # Convert header match to regex: (?i)Key:.*Value
-                # Escape special chars in key/value just in case, but usually they are simple
-                # For simplicity, we assume simple strings. 
-                # If value is empty, just check for key? No, usually key:value.
+                
+                
+                
+                
                 if v:
                     regex = f"(?i){re.escape(k)}:.*{re.escape(v)}"
                     rules_to_add.append({
@@ -92,26 +92,26 @@ def validate_rule(r):
         
         if rules_to_add:
             return True, '', rules_to_add
-    # ---------------------------------------------------------------------
+    
 
     if not all((name, method, location, pattern)):
         return False, 'missing_field', None
 
-    # Normalize method/match_mode
+    
     method = method.lower()
     if method == 'icon_hash':
-        # We don't support icon_hash yet, skip silently or log
+        
         return False, 'unsupported_method_icon_hash', None
     
     if method not in ALLOWED_MATCH_MODES:
         return False, f'invalid_match_mode_{method}', None
 
-    # Normalize location
+    
     location = location.lower()
     if location not in ALLOWED_LOCATIONS:
         return False, f'invalid_location_{location}', None
 
-    # Handle pattern list (flatten)
+    
     rules_to_add = []
     if isinstance(pattern, list):
         for p in pattern:
@@ -129,12 +129,12 @@ def validate_rule(r):
             'pattern': pattern
         })
 
-    # Validate regex for each
+    
     valid_rules = []
     for rule in rules_to_add:
         if rule['match_mode'] == 'regex':
             if not is_valid_rust_regex(rule['pattern']):
-                continue # Skip invalid regex
+                continue 
         valid_rules.append(rule)
     
     if not valid_rules:
@@ -146,7 +146,7 @@ def validate_rule(r):
 def merge_rules(builtin, external):
     seen = set()
     final = []
-    # add builtin first
+    
     for r in builtin:
         key = (r.get('name'), r.get('pattern'), r.get('location'))
         if key not in seen:
@@ -163,7 +163,7 @@ def merge_rules(builtin, external):
             continue
         
         for rule in normalized_rules:
-            # normalize strings
+            
             if rule['match_mode'] == 'keyword':
                 rule['pattern'] = rule['pattern'].lower()
             
@@ -214,7 +214,7 @@ def main():
     merged, added, skipped = merge_rules(builtin, external)
     print(f'Existing rules: {len(builtin)}, external source items: {len(external)}, added new rules: {added}, skipped source items: {skipped}')
     
-    # backup and write
+    
     bak = backup_file(BUILTIN_PATH)
     if bak:
         print(f'Backed up builtin fingerprints to: {bak}')
@@ -224,7 +224,7 @@ def main():
         print(f'Merged fingerprints written to {BUILTIN_PATH}')
     except Exception as e:
         print(f'Failed to write merged fingerprints: {e}')
-        # If we backed up, try to restore
+        
         if bak and os.path.exists(bak):
             os.rename(bak, BUILTIN_PATH)
             print('Restored original built-in fingerprints from backup')

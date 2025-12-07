@@ -1,4 +1,4 @@
-#!/bin/bash
+
 
 echo "[INFO] Checking Rust installation..."
 
@@ -15,6 +15,9 @@ cargo build --release
 
 if [ $? -ne 0 ]; then
     echo "[ERROR] Build failed. Please check the error messages above."
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        echo "[HINT] On macOS, ensure you have OpenSSL installed: brew install openssl@3"
+    fi
     exit 1
 fi
 
