@@ -1,5 +1,8 @@
 name: Build Release
 
+permissions:
+  contents: write
+
 on:
   push:
     tags:
@@ -91,8 +94,11 @@ jobs:
         with:
           path: artifacts
 
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*
           draft: false
