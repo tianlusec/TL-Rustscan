@@ -94,13 +94,23 @@ jobs:
         with:
           path: artifacts
 
-      - name: Display structure of downloaded files
-        run: ls -R artifacts
+      - name: Rename artifacts
+        run: |
+          mkdir -p release_assets
+          if [ -f artifacts/TL-Rustscan-linux-x86_64/TL-Rustscan ]; then
+            mv artifacts/TL-Rustscan-linux-x86_64/TL-Rustscan release_assets/TL-Rustscan-linux-x86_64
+          fi
+          if [ -f artifacts/TL-Rustscan-macos-x86_64/TL-Rustscan ]; then
+            mv artifacts/TL-Rustscan-macos-x86_64/TL-Rustscan release_assets/TL-Rustscan-macos-x86_64
+          fi
+          if [ -f artifacts/TL-Rustscan-windows-x86_64.exe/TL-Rustscan.exe ]; then
+            mv artifacts/TL-Rustscan-windows-x86_64.exe/TL-Rustscan.exe release_assets/TL-Rustscan-windows-x86_64.exe
+          fi
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: release_assets/*
           draft: false
           prerelease: false
         env:
